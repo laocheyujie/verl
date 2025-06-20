@@ -88,14 +88,17 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     final_compute_score = compute_score
 
     if compute_score is None:
+        # NOTE: 如果用户没有提供自定义的奖励函数，则使用默认的奖励函数
         sandbox_config = config.reward_model.get("sandbox_fusion")
         sandbox_url = sandbox_config.get("url") if sandbox_config else None
         if sandbox_url:
+            # NOTE: 使用沙盒融合 API 计算奖励
             sandbox_manager = multiprocessing.Manager()
             # Create a semaphore to control concurrent access to the sandbox
             _concurrent_semaphore = sandbox_manager.Semaphore(sandbox_config.get("max_concurrent", 64))
             final_compute_score = partial(default_compute_score, sandbox_fusion_url=sandbox_url, concurrent_semaphore=_concurrent_semaphore)
         else:
+            # NOTE: 使用单独的进程计算奖励
             final_compute_score = default_compute_score
 
     # Instantiate and return the reward manager with the specified parameters

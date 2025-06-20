@@ -43,18 +43,11 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, Ra
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
-from verl.trainer.ppo.metric_utils import (
-    compute_data_metrics,
-    compute_throughout_metrics,
-    compute_timing_metrics,
-    process_validation_metrics,
-)
+from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, process_validation_metrics
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.utils.checkpoint.checkpoint_manager import BaseCheckpointManager, find_latest_ckpt_path
 from verl.utils.debug import marked_timer
-from verl.utils.metric import (
-    reduce_metrics,
-)
+from verl.utils.metric import reduce_metrics
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -67,12 +60,19 @@ class Role(Enum):
     To create more roles dynamically, you can subclass Role and add new members
     """
 
+    # NOTE: Actor Model: 负责执行动作（生成文本）的智能体：根据当前状态（输入提示）生成响应，并计算动作的概率分布
     Actor = 0
+    # NOTE: 负责生成训练数据的过程：使用当前策略生成多个候选响应，为训练提供样本
     Rollout = 1
+    # NOTE: 将Actor和Rollout功能合并的混合引擎：减少通信开销，提高训练效率
     ActorRollout = 2
+    # NOTE: Critic Model: 价值函数网络，用于估计状态的价值：为每个状态（文本序列）提供价值估计，用于计算优势函数
     Critic = 3
+    # NOTE: Reference Model: 作为参考的基准策略模型：计算KL散度，防止新策略偏离原始策略太远
     RefPolicy = 4
+    # NOTE: Reward Model: 评估生成文本质量的模型：为生成的响应提供奖励信号
     RewardModel = 5
+    # NOTE: 将Actor、Rollout和RefPolicy三个功能合并：最大化计算效率，减少进程间通信
     ActorRolloutRef = 6
 
 

@@ -84,8 +84,10 @@ class TaskRunner:
         from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
+        # NOTE: AutoTokenizer 然后对于没有 pad_token 的 tokenizer，设置 pad_token 为 eos_token，pad_token_id 为 eos_token_id
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
+        # NOTE: AutoProcessor
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
         # Version validation for vllm.
@@ -98,6 +100,7 @@ class TaskRunner:
 
         # Define worker classes based on the actor strategy.
         if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
+            # NOTE: 保证 Critic 和 Actor 使用相同的策略
             assert config.critic.strategy in ["fsdp", "fsdp2"]
             from verl.single_controller.ray import RayWorkerGroup
             from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
@@ -106,6 +109,7 @@ class TaskRunner:
             ray_worker_group_cls = RayWorkerGroup
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
+            # NOTE: 保证 Critic 和 Actor 使用相同的策略
             assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
             from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
             from verl.workers.megatron_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
@@ -164,8 +168,10 @@ class TaskRunner:
         from verl.utils.dataset.rl_dataset import collate_fn
 
         # Create training and validation datasets.
+        # NOTE: 创建训练和验证数据集 Dataset 类
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        # NOTE: 随机采样 or 顺序采样
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.
@@ -212,6 +218,7 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
         from verl.utils.import_utils import load_extern_type
 
         # Dynamically load the custom dataset class
+        # NOTE: 动态加载自定义的数据集类
         dataset_cls = load_extern_type(data_config.custom_cls.path, data_config.custom_cls.name)
         # Verify that the custom dataset class inherits from torch.utils.data.Dataset
         if not issubclass(dataset_cls, Dataset):
