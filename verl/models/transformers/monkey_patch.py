@@ -26,13 +26,7 @@ from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_utils import PreTrainedModel
 
 from verl.utils.import_utils import is_trl_available
-from verl.utils.ulysses import (
-    gather_heads_scatter_seq,
-    gather_seq_scatter_heads,
-    get_ulysses_sequence_parallel_group,
-    get_ulysses_sequence_parallel_world_size,
-    slice_input_tensor,
-)
+from verl.utils.ulysses import gather_heads_scatter_seq, gather_seq_scatter_heads, get_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_world_size, slice_input_tensor
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -70,6 +64,7 @@ def _ulysses_flash_attention_forward(
     ulysses_sp_size = get_ulysses_sequence_parallel_world_size()
 
     ########## AlltoAll for Ulysses ##########
+    # NOTE: SP 的关键实现
     if ulysses_sp_size > 1:
         assert position_ids is not None, "position_ids is required for Ulysses sequence parallelism"
 
@@ -84,6 +79,7 @@ def _ulysses_flash_attention_forward(
         value_states = repeat_kv(value_states, repeats)
 
         # (bsz, seq_len/n, n_head, head_dim) -> (bsz, seq_len, n_head/n, head_dim)
+        # NOTE: 把 Seq Gather; 把 Head Scatter
         query_states = gather_seq_scatter_heads(query_states, seq_dim=1, head_dim=2)
         key_states = gather_seq_scatter_heads(key_states, seq_dim=1, head_dim=2)
         value_states = gather_seq_scatter_heads(value_states, seq_dim=1, head_dim=2)
@@ -98,11 +94,13 @@ def _ulysses_flash_attention_forward(
         position_ids = torch.concat(position_ids_list, dim=-1)
 
     # (bsz, seq_len, n_head/n, head_dim)
+    # NOTE: 标准的前向计算
     attn_output = _flash_attention_forward(query_states, key_states, value_states, *args, position_ids=position_ids, **kwargs)
 
     ########## AlltoAll for Ulysses ##########
     if ulysses_sp_size > 1:
         # (bsz, seq_len, n_head/n, head_dim) -> (bsz, seq_len/n, n_head, head_dim)
+        # NOTE: 把 Seq Scatter; 把 Head Gather
         attn_output = gather_heads_scatter_seq(attn_output, seq_dim=1, head_dim=2)
 
     return attn_output
@@ -221,9 +219,7 @@ def apply_monkey_patch(
 
     # TODO: VLM models only, unify monkey patch to LLM models.
     if model.config.model_type == "qwen2_5_vl":
-        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-            Qwen2_5_VLFlashAttention2,
-        )
+        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLFlashAttention2
 
         if use_remove_padding or ulysses_sp_size > 1:
             from verl.models.transformers.qwen2_vl import ulysses_flash_attn_forward
@@ -242,9 +238,7 @@ def apply_monkey_patch(
                 patch_vlm_for_ulysses_input_slicing(Qwen2_5_VLModel)
 
     elif model.config.model_type == "qwen2_vl":
-        from transformers.models.qwen2_vl.modeling_qwen2_vl import (
-            Qwen2VLFlashAttention2,
-        )
+        from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLFlashAttention2
 
         if use_remove_padding or ulysses_sp_size > 1:
             from verl.models.transformers.qwen2_vl import ulysses_flash_attn_forward

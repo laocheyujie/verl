@@ -18,7 +18,7 @@ import torch
 
 from verl import DataProto
 from verl.utils.reward_score import default_compute_score
-from verl.workers.reward_manager import register
+from verl.workers.reward_manager.registry import register
 
 
 @register("naive")
@@ -92,6 +92,7 @@ class NaiveRewardManager:
             else:
                 reward = score
 
+            # NOTE: 将奖励值存储到 reward_tensor 中，实际上放在了最后一个 token 的位置
             reward_tensor[i, valid_response_length - 1] = reward
 
             if data_source not in already_print_data_sources:

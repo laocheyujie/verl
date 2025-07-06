@@ -82,6 +82,8 @@ class RLHFDataset(Dataset):
         processor (ProcessorMixin, optional): Multimodal preprocessor for images/videos.
     """
 
+    # NOTE: RLHFDataset 是 verl 中用于 RLHF 数据加载的数据集类，继承自 datasets.Dataset，主要用于处理 Parquet 文件中的数据，包括数据下载、tokenize、过滤、预处理等
+
     def __init__(
         self,
         data_files: Union[str, List[str]],
@@ -149,6 +151,7 @@ class RLHFDataset(Dataset):
                 def doc2len(doc) -> int:
                     messages = self._build_messages(doc)
                     raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+                    # NOTE: 把 messages 里的 image 和 video 拿出来，然后用 processor 处理，计算长度
                     images = [process_image(image) for image in messages.pop(image_key)] if image_key in messages else None
                     videos = [process_video(video) for video in messages.pop(video_key)] if video_key in messages else None
 
@@ -159,6 +162,7 @@ class RLHFDataset(Dataset):
                 def doc2len(doc) -> int:
                     return len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
 
+            # NOTE: 过滤掉长度超过 max_prompt_length 的样本
             self.dataframe = self.dataframe.filter(
                 lambda doc: doc2len(doc) <= self.max_prompt_length,
                 num_proc=self.num_workers,
@@ -245,6 +249,7 @@ class RLHFDataset(Dataset):
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
 
+        # NOTE: 对 input_ids 和 attention_mask 进行处理: 1. 左 padding 2. 截断
         input_ids, attention_mask = verl_F.postprocess_data(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -305,6 +310,15 @@ class RLHFDataset(Dataset):
             logger.warning("tools_kwargs is empty for index {}, data source: {}", index, row_dict["data_source"])
         row_dict["index"] = index
         row_dict["tools_kwargs"] = tools_kwargs
+        # NOTE: tools_kwargs 结构：
+        # tools_kwargs = {
+        #     "tool_name": {
+        #         "create_kwargs": {...},      # 工具创建时的参数
+        #         "execute_kwargs": {...},     # 工具执行时的参数（可选）
+        #         "calc_reward_kwargs": {...}, # 计算奖励时的参数（可选）
+        #         "release_kwargs": {...},     # 释放资源时的参数（可选）
+        #     }
+        # }
         return row_dict
 
     def __getstate__(self):

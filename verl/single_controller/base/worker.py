@@ -80,6 +80,8 @@ class Worker(WorkerHelper):
     This class manages worker initialization, configuration, and provides methods for executing
     distributed operations. It handles communication settings, device configuration, and worker
     metadata management.
+
+    NOTE: Worker 是 RL 里面的逻辑类（比如 actor 和 critic），实际管理 RL 的数据流
     """
 
     fused_worker_attr_name = "fused_worker_dict"

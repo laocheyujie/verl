@@ -207,6 +207,9 @@ class DataProto:
     same batch size should be put inside batch.
     """
 
+    # NOTE: DataProto 提供标准化的数据交换协议，基于 PyTorch 的 TensorDict，支持张量的批量操作
+    # 同时通过 non_tensor_batch 字典来处理 NumPy 数组等非张量数据
+    # meta_info 存储额外的元信息
     batch: TensorDict = None
     non_tensor_batch: Dict = field(default_factory=dict)
     meta_info: Dict = field(default_factory=dict)
@@ -311,6 +314,7 @@ class DataProto:
         """Check the consistency of the DataProto. Mainly for batch and non_tensor_batch
         We expose this function as a public one so that user can call themselves directly
         """
+        # NOTE: 确保在数据分离和合并过程的一致性
         if self.batch is not None:
             assert len(self.batch.batch_size) == 1, "only support num_batch_dims=1"
 

@@ -122,6 +122,8 @@ class WorkerGroup:
     """
     Base class for managing a group of workers in a distributed system.
     The class provides methods for worker management, aliveness checking, and method binding.
+
+    NOTE: WorkerGroup 只用于分布式系统的资源调度
     """
 
     fused_worker_execute_fn_name = "_fuw_execute"

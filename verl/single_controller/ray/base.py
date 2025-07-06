@@ -233,6 +233,10 @@ class RayWorkerGroup(WorkerGroup):
     This class extends WorkerGroup to provide Ray-specific functionality for
     creating and managing groups of Ray actors with specific resource requirements
     and scheduling strategies.
+
+    NOTE: RayWorkerGroup 这个类就是专门用于资源调度的。
+    通过其统一的 _init_with_resource_pool 方法，为每个 GPU 创建一个 worker，
+    最终实例化每种 RL worker 并分配资源
     """
 
     def __init__(
@@ -324,6 +328,7 @@ class RayWorkerGroup(WorkerGroup):
         strategy = "PACK"
         if bin_pack:
             strategy = "STRICT_PACK"
+        # NOTE: 从 Ray 申请 Placement Groups
         pgs = resource_pool.get_placement_groups(strategy=strategy, device_name=self.device_name)
         world_size = resource_pool.world_size
         self._world_size = world_size
@@ -334,6 +339,7 @@ class RayWorkerGroup(WorkerGroup):
         local_world_size = resource_pool.store[0]
         for pg_idx, pg in enumerate(sort_placement_group_by_node_ip(pgs)):
             assert local_world_size <= pg.bundle_count, f"when generating for {self.name_prefix}, for the "
+            # NOTE: 为每个 GPU 创建一个 worker
             for local_rank in range(local_world_size):
                 rank += 1
 

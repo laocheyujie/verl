@@ -99,17 +99,20 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
     """
 
     def __init__(self, config: DictConfig, role: str):
+        # NOTE: 1. 调用 Worker 基类的构造函数
         Worker.__init__(self)
 
         self.config = config
         import torch.distributed
 
+        # NOTE: 2. 如果 PyTorch 分布式环境尚未初始化，则进行初始化，包括设置通信后端和进程组
         if not torch.distributed.is_initialized():
             rank = int(os.environ.get("RANK", 0))
             world_size = int(os.environ.get("WORLD_SIZE", 1))
             torch.distributed.init_process_group(backend=f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}", rank=rank, world_size=world_size)
 
         # build device mesh for FSDP
+        # NOTE: 3. 为 FSDP 创建设备网格，用于模型参数的分片
         world_size = torch.distributed.get_world_size()
         # TODO(sgm): support FSDP hybrid shard for larger model
         self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=self.config.actor.fsdp_config.fsdp_size)
@@ -118,13 +121,16 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
         self.ulysses_device_mesh = None
         self.ulysses_sequence_parallel_size = self.config.actor.get("ulysses_sequence_parallel_size", 1)
         dp = world_size // self.ulysses_sequence_parallel_size
+        # NOTE: 4. 如果启用 Ulysses 序列并行，则初始化其设备网格
         if self.ulysses_sequence_parallel_size > 1:
             self.ulysses_device_mesh = init_device_mesh(device_name, mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"])
 
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
+        # NOTE: 5. 获取 LoRA rank 和是否使用 LoRA 的标志
         self._lora_rank = self.config.model.get("lora_rank", 0)
         self._is_lora = self._lora_rank > 0
 
+        # NOTE: 6. 根据传入的 role 参数设置 Worker 的具体角色（actor, rollout, ref）
         self.role = role
         assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
 
@@ -132,6 +138,7 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
 
+        # NOTE: 7. 根据 Worker 角色配置 profiler，用于性能分析
         profiler_config = ProfilerConfig()
         if self._is_actor:
             profiler_config = profiler_config.union(ProfilerConfig(**OmegaConf.to_object(config.actor.get("profiler", DictConfig({})))))
@@ -142,6 +149,7 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
 
         WorkerProfilerExtension.__init__(self, WorkerProfiler(rank=self.rank, config=profiler_config))
 
+        # NOTE: 8. 配置 parameter offload 和 optimizer offload
         self._is_offload_param = False
         self._is_offload_optimizer = False
         if self._is_actor:
@@ -152,13 +160,18 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
             self._is_offload_param = self.config.ref.fsdp_config.get("param_offload", False)
 
         # normalize config
+        # NOTE: 9. 为 Actor，Rollout 和 Reference 分配 normalize batch size
+        # NOTE: data.train_batch_size: 在一次完整的 PPO 迭代（从 rollout 到 train）中，从数据集中采样并用于生成 experience 的总样本数量，决定了每次 policy 更新所依据的数据量
         if self._is_actor:
+            # NOTE: ppo_mini_batch_size: 模型会在数据累积到一个 mini batch 后更新一次参数
+            # NOTE: ppo_mini_batch_size = ppo_mini_batch_size * rollout.n
             self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
             self.config.actor.ppo_mini_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
             assert self.config.actor.ppo_mini_batch_size > 0, f"ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than 0 after normalization"
             # micro bsz
             if self.config.actor.ppo_micro_batch_size is not None:
                 self.config.actor.ppo_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
+                # NOTE: ppo_micro_batch_size_per_gpu: 由于一个 mini batch 的数据量可能仍然太大，无法一次性前向和反向传播，因此需要将其进一步拆分为 micro batch。每个 micro batch 会计算一次梯度并且累计，但是不会立刻更新模型参数。处理完整个 mini batch 后，才用累积的梯度进行一次参数更新
                 self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
 
             if self.config.actor.ppo_micro_batch_size_per_gpu is not None:
@@ -207,17 +220,22 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
 
         torch_dtype = fsdp_config.get("model_dtype", None)
         if torch_dtype is None:
+            # NOTE: Actor 使用 fp32; Reference 使用 bf16
+            # NOTE: 因为 pytorch 的各种 optimizer 都是直接和 parameter 绑定的，用 bf16 的 parameter 初始化的 optimizer 也是 bf16
+            # NOTE: 所以 model 先 load 了 fp32，然后初始化 optimizer 作为混合精度，最后把 model 转成 bf16
             torch_dtype = torch.float32 if self._is_actor else torch.bfloat16
         else:
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
+        # NOTE: 初始化 Hugging Face 配置
         actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2")
 
         # patch for kimi-vl
         if getattr(actor_model_config, "model_type", None) == "kimi_vl":
             actor_model_config.text_config.topk_method = "greedy"
 
+        # NOTE: 获取 Generation Config
         self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
 
         override_config_kwargs = {
@@ -235,11 +253,13 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
+            # NOTE: 使用 Hugging Face 的 AutoModelForCausalLM 或 AutoModelForVision2Seq 从预训练模型加载基础模型
             if type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys():
                 actor_module_class = AutoModelForVision2Seq
             else:
                 actor_module_class = AutoModelForCausalLM
 
+            # NOTE: 加载模型
             actor_module = actor_module_class.from_pretrained(
                 pretrained_model_name_or_path=local_path,
                 torch_dtype=torch_dtype,
@@ -248,11 +268,13 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
             )
 
             # Apply Liger kernel to the model if use_liger is set to True
+            # NOTE: 应用 Liger kernel 优化技术
             if use_liger:
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
 
                 _apply_liger_kernel_to_instance(model=actor_module)
 
+            # NOTE: 应用 融合 kernel 优化技术
             fused_kernel_options = self.config.model.get("fused_kernel_options", None)
             fused_kernels_backend = fused_kernel_options.get("impl_backend", None) if fused_kernel_options is not None else None
 
@@ -267,8 +289,10 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
 
+            # NOTE: 应用 gradient checkpointing 优化技术
             if enable_gradient_checkpointing:
                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            # NOTE: 应用 LoRA
             if self._is_lora:
                 print("Applying LoRA to actor module")
                 actor_module.enable_input_require_grads()
@@ -295,6 +319,7 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
+        # NOTE: 根据配置选择 FSDP 或 FSDP2 策略，将模型封装到分布式训练框架中，支持参数分片和混合精度训练
         auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None), is_lora=self.config.model.get("lora_rank", 0) > 0)
 
         if self._is_rollout and self.config.rollout.name == "hf":
@@ -310,8 +335,11 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
         # TODO: add transformer policy
         # We force reference policy to use CPUOffload to save memory.
         # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
+        # NOTE: 我们强制 reference policy 使用 CPUOffload 来节省内存
+        # NOTE: 我们强制关闭 actor 的 CPUOffload，因为它在使用 grad accumulation 时会导致不正确的结果
         cpu_offload = None if role == "actor" else CPUOffload(offload_params=True)
         fsdp_strategy = self.config.actor.strategy
+        # NOTE: 根据配置的策略，将模型封装到 FSDP 中
         if fsdp_strategy == "fsdp":
             actor_module_fsdp = FSDP(
                 actor_module,
@@ -349,12 +377,15 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
         else:
             raise NotImplementedError(f"not implement {fsdp_strategy}")
 
+        # NOTE: 如果启用了激活卸载，则启用它
         if enable_activation_offload:
             enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
 
+        # NOTE: 记录 FSDP 初始化之后的 GPU 内存使用情况
         log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
 
         # TODO: add more optimizer args into config
+        # NOTE: 如果当前 Worker 是 Actor 角色，则初始化 AdamW 优化器和学习率调度器
         if role == "actor" and optim_config is not None:
             from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
 
@@ -395,6 +426,7 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
         from torch.distributed.device_mesh import init_device_mesh
 
         # TODO(sgm): support FSDP hybrid shard for larger model
+        # NOTE: 为 Rollout 创建推理张量并行（infer_tp）设备网格
         infer_tp = self.config.rollout.tensor_model_parallel_size
         dp = self.world_size // infer_tp
         assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
@@ -460,6 +492,7 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
 
             local_path = copy_to_local(self.config.model.path)
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
+            # NOTE: 创建 SGLangRollout 实例
             rollout = SGLangRollout(
                 actor_module=local_path,
                 config=self.config.rollout,
@@ -471,6 +504,7 @@ class ActorRolloutRefWorker(Worker, WorkerProfilerExtension):
 
             if torch.distributed.get_world_size() == 1:
                 self.config.rollout.load_format = "dummy_hf"
+            # NOTE: 创建 FSDPSGLangShardingManager 实例
             rollout_sharding_manager = FSDPSGLangShardingManager(
                 module=self.actor_module_fsdp,
                 inference_engine=rollout._engine,

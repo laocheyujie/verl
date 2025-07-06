@@ -34,6 +34,7 @@ def main(config):
 # Define a function to run the PPO-like training process
 def run_ppo(config) -> None:
     # Check if Ray is not initialized
+    # NOTE: 初始化 Ray 集群，配置 CPU 资源和运行时环境变量
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration
         # Set environment variables in the runtime environment to control tokenizer parallelism,
@@ -50,7 +51,11 @@ def run_ppo(config) -> None:
         nsight_options = OmegaConf.to_container(config.trainer.controller_nsight_options)
         runner = TaskRunner.options(runtime_env={"nsight": nsight_options}).remote()
     else:
+        # NOTE: 创建远程 TaskRunner 实例
+        # NOTE: TaskRunner 是 Ray 中的一个远程 actor，它将在 Ray 集群上异步执行主要的训练任务
         runner = TaskRunner.remote()
+    # NOTE: 异步执行远程任务 runner.run()，并等待其完成
+    # NOTE: 通过 ray.get() 阻塞直到远程任务执行完毕，确保整个初始化流程的顺序性
     ray.get(runner.run.remote(config))
 
     # [Optional] get the path of the timeline trace file from the configuration, default to None
@@ -62,6 +67,10 @@ def run_ppo(config) -> None:
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
 class TaskRunner:
+    """
+    NOTE: TaskRunner 是 verl 中实现 PPO/GRPO 训练的核心组件，
+    它通过将整个 RL 训练流程封装在一个独立的 Ray Actor 中，实现了任务的封装、资源隔离和分布式协调
+    """
     def run(self, config):
         # Print the initial configuration. `resolve=True` will evaluate symbolic values.
         from pprint import pprint
@@ -74,12 +83,16 @@ class TaskRunner:
 
         pprint(OmegaConf.to_container(config, resolve=True))
 
+        # NOTE: 加载、解析和验证训练任务的配置（使用 OmegaConf），确保所有参数的正确性和一致性
         OmegaConf.resolve(config)
 
         # Download the checkpoint from HDFS to the local machine.
         # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
+        # NOTE: 1. 模型下载
+        # NOTE: 将模型文件从 HDFS 远程路径复制到本地，确保所有 Worker 都可以访问，使用共享内存（`use_shm`）可以加速模型加载
         local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
 
+        # NOTE: 2. Tokenizer 和 Processor 初始化
         # Instantiate the tokenizer and processor.
         from verl.utils import hf_processor, hf_tokenizer
 
@@ -99,11 +112,15 @@ class TaskRunner:
                     raise NotImplementedError("PPO LoRA is not supported before vllm 0.7.3")
 
         # Define worker classes based on the actor strategy.
+        # NOTE: 3. Worker 类型选择
+        # NOTE: 根据配置中指定的 Actor 策略（如 fsdp 或 megatron），动态选择相应的 Worker 类（例如 ActorRolloutRefWorker 和 CriticWorker），并确定使用的 RayWorkerGroup 类型
         if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
             # NOTE: 保证 Critic 和 Actor 使用相同的策略
             assert config.critic.strategy in ["fsdp", "fsdp2"]
             from verl.single_controller.ray import RayWorkerGroup
-            from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
+            from verl.workers.fsdp_workers import (ActorRolloutRefWorker,
+                                                   AsyncActorRolloutRefWorker,
+                                                   CriticWorker)
 
             actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
@@ -111,8 +128,11 @@ class TaskRunner:
         elif config.actor_rollout_ref.actor.strategy == "megatron":
             # NOTE: 保证 Critic 和 Actor 使用相同的策略
             assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-            from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
-            from verl.workers.megatron_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
+            from verl.single_controller.ray.megatron import \
+                NVMegatronRayWorkerGroup
+            from verl.workers.megatron_workers import (
+                ActorRolloutRefWorker, AsyncActorRolloutRefWorker,
+                CriticWorker)
 
             actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
             ray_worker_group_cls = NVMegatronRayWorkerGroup
@@ -123,6 +143,9 @@ class TaskRunner:
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
         # Map roles to their corresponding remote worker classes.
+        # NOTE: 4. 定义角色到 Worker 类的映射
+        # NOTE: 创建一个远程的 Ray Actor，将其包装成一个 Ray Actor 类
+        # NOTE: 定义 Ray 资源池的规格和角色到资源池的映射，用于 GPU 资源的分配和管理
         role_worker_mapping = {
             Role.ActorRollout: ray.remote(actor_rollout_cls),
             Role.Critic: ray.remote(CriticWorker),
@@ -130,6 +153,7 @@ class TaskRunner:
 
         # Define the resource pool specification.
         # Map roles to the resource pool.
+        # NOTE: 5. 定义资源池的规格和角色到资源池的映射
         global_pool_id = "global_pool"
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
@@ -145,7 +169,10 @@ class TaskRunner:
         # - for code related prompt, we send to a sandbox if there are test cases
         # finally, we combine all the rewards together
         # The reward type depends on the tag of the data
+        # NOTE: 6. Reward Model Worker 的初始化
+        # NOTE: 加载用于训练和验证的奖励模型
         if config.reward_model.enable:
+            # NOTE: 使用奖励模型
             if config.reward_model.strategy in ["fsdp", "fsdp2"]:
                 from verl.workers.fsdp_workers import RewardModelWorker
             elif config.reward_model.strategy == "megatron":
@@ -156,11 +183,14 @@ class TaskRunner:
             mapping[Role.RewardModel] = global_pool_id
 
         # Add a reference policy worker if KL loss or KL reward is used.
+        # NOTE: 7. Reference Policy Worker 的初始化
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
+            # NOTE: 使用参考模型计算 KL 散度
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 
         # Load the reward manager for training and validation.
+        # NOTE: 8. 加载奖励管理器
         reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
         val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
@@ -168,13 +198,14 @@ class TaskRunner:
         from verl.utils.dataset.rl_dataset import collate_fn
 
         # Create training and validation datasets.
-        # NOTE: 创建训练和验证数据集 Dataset 类
+        # NOTE: 9. 创建训练和验证数据集 Dataset 类
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
         # NOTE: 随机采样 or 顺序采样
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.
+        # NOTE: 10. 创建 RayPPOTrainer 实例，它是管理所有计算资源和训练流程的中央协调器
         trainer = RayPPOTrainer(
             config=config,
             tokenizer=tokenizer,
@@ -191,8 +222,12 @@ class TaskRunner:
             device_name=config.trainer.device,
         )
         # Initialize the workers of the trainer.
+        # NOTE: 11. 初始化训练器的 Workers
+        # NOTE: 调用 RayPPOTrainer 的 init_workers() 方法，将配置的 Worker 类实例化到 Ray 集群的 GPU 上，为实际计算做准备
         trainer.init_workers()
         # Start the training process.
+        # NOTE: 12. 启动训练过程
+        # NOTE: 调用 RayPPOTrainer 的 fit() 方法，启动 PPO 训练循环
         trainer.fit()
 
 
@@ -208,6 +243,7 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
     Returns:
         dataset (Dataset): The dataset.
     """
+    # NOTE: 数据加载与预处理
     from torch.utils.data import Dataset
 
     from verl.utils.dataset.rl_dataset import RLHFDataset

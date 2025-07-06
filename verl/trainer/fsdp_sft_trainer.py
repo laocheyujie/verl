@@ -52,11 +52,7 @@ from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.torch_dtypes import PrecisionType
 from verl.utils.torch_functional import get_cosine_schedule_with_warmup, get_wsd_schedule_with_warmup
 from verl.utils.tracking import Tracking
-from verl.utils.ulysses import (
-    gather_outpus_and_unpad,
-    get_ulysses_sequence_parallel_world_size,
-    ulysses_pad_and_slice_inputs,
-)
+from verl.utils.ulysses import gather_outpus_and_unpad, get_ulysses_sequence_parallel_world_size, ulysses_pad_and_slice_inputs
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 if is_cuda_available:
@@ -193,6 +189,7 @@ class FSDPSFTTrainer:
                 trust_remote_code=trust_remote_code,
             )
 
+            # NOTE: SP
             if self.use_remove_padding or self.config.ulysses_sequence_parallel_size > 1:
                 from verl.models.transformers.monkey_patch import apply_monkey_patch
 

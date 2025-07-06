@@ -92,6 +92,7 @@ class ResourcePoolManager:
             # For FSDP backend, we recommend using max_colocate_count=1 that merge all WorkerGroups into one.
             # For Megatron backend, we recommend using max_colocate_count>1
             # that can utilize different WorkerGroup for differnt models
+            # NOTE: 通过 ResourcePoolManager 创建 Ray 资源池
             resource_pool = RayResourcePool(process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=1, name_prefix=resource_pool_name)
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
@@ -342,7 +343,9 @@ class RayPPOTrainer:
         else:
             raise NotImplementedError
 
+        # NOTE: 调用 _validate_config() 方法验证配置的合理性
         self._validate_config()
+        # NOTE: 存储训练和验证数据集、collate 函数和训练数据采样器
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
     def _validate_config(self):
@@ -703,11 +706,19 @@ class RayPPOTrainer:
         Creates:
         1. Ray resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
+        
+        NOTE: init_workers() 函数负责在 Ray 集群上实例化和初始化 ActorRollout、Critic、Reference Policy 和 Reward Model Workers
         """
+        # NOTE: 1. 创建资源池：通过 ResourcePoolManager 创建 Ray 资源池
+        # NOTE: 为每个角色（例如 actor_rollout、critic、ref）指定用哪个类初始化 worker，并且说明在哪个资源池里分配它们
         self.resource_pool_manager.create_resource_pool()
 
+        # NOTE: 2. 初始化资源池到类的映射：为每个资源池创建一个字典，用于存储不同角色 Worker 的 RayClassWithInitArgs 包装器
+        # NOTE: RayClassWithInitArgs 用于延迟初始化 Worker，存储了 Worker 的类和初始化参数
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
+        # NOTE: 3. 创建不同角色的 Worker 的 RayClassWithInitArgs 实例
+        # NOTE: 根据配置启用情况，为 ActorRollout、Critic、Reference Policy 和 Reward Model 创建对应的 RayClassWithInitArgs 实例
         # create actor and rollout
         if self.hybrid_engine:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
@@ -739,6 +750,9 @@ class RayPPOTrainer:
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
 
+        # NOTE: 4. 初始化 WorkerGroup：
+        # NOTE: 遍历所有资源池，将同一资源池中的多个 Worker 类通过 create_colocated_worker_cls 组合成一个共置类，然后实例化 RayWorkerGroup
+        # NOTE: RayWorkerGroup 负责在多个 GPU 上启动多个 Worker 实例。最后调用 spawn() 方法在 Ray 中实际创建 Worker 实例
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -753,12 +767,25 @@ class RayPPOTrainer:
             assert OmegaConf.select(self.config.trainer, "worker_nsight_options") is not None, "worker_nsight_options must be set when profile_steps is set"
             wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(OmegaConf.select(self.config.trainer, "worker_nsight_options"))
 
+        # NOTE: 根据资源池和角色，批量创建多个 worker 实例（Ray Actor）并统一管理它们，赋予对应的职责
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            # NOTE: worker_dict_cls 就是 ActorRolloutRefWorker 类
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
-            wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls, device_name=self.device_name, **wg_kwargs)
+            # NOTE: ray_worker_group_cls 就是 RayWorkerGroup 实例，指定资源池并规定角色和对应的类
+            wg_dict = self.ray_worker_group_cls(
+                resource_pool=resource_pool,         # NOTE: 只需要指定资源池
+                ray_cls_with_init=worker_dict_cls,   # NOTE: 一个包含数个 worker 的类 e.g. actor_roll, critic, ref
+                device_name=self.device_name,        # NOTE: 指定设备名称
+                **wg_kwargs,
+            )
+            # NOTE: 通过.spawn() 获取角色对 Ray Actor 实例的映射
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
 
+        # NOTE: 5. 初始化各个 Worker：
+        # NOTE: 根据角色从创建的 WorkerGroup 字典中获取对应的 WorkerGroup，并调用其 init_model() 方法，按照依赖关系依次初始化不同的 Worker 模块
+        # NOTE: ActorRollout Worker 通常最后初始化以优化内存使用
+        # NOTE: 调用 init_model() 完成模型加载
         if self.use_critic:
             self.critic_wg = all_wg["critic"]
             self.critic_wg.init_model()
@@ -831,6 +858,7 @@ class RayPPOTrainer:
             if not os.path.isabs(checkpoint_folder):
                 working_dir = os.getcwd()
                 checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
+            # NOTE: 通过读取 latest_checkpointed_iteration.txt 文件，找到最新的检查点路径
             global_step_folder = find_latest_ckpt_path(checkpoint_folder)  # None if no latest
 
         # find global_step_folder
@@ -839,6 +867,7 @@ class RayPPOTrainer:
                 print("Training from scratch")
                 return 0
         else:
+            # NOTE: 如果 resume_mode 为 resume_path，则从指定的检查点路径
             if self.config.trainer.resume_mode == "resume_path":
                 assert isinstance(self.config.trainer.resume_from_path, str), "resume ckpt must be str type"
                 assert "global_step_" in self.config.trainer.resume_from_path, "resume ckpt must specify the global_steps"
@@ -894,6 +923,7 @@ class RayPPOTrainer:
 
         from verl.utils.tracking import Tracking
 
+        # NOTE: 1. 创建 Tracking 日志记录器
         logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -901,9 +931,11 @@ class RayPPOTrainer:
             config=OmegaConf.to_container(self.config, resolve=True),
         )
 
+        # NOTE: 2. 设置全局步数
         self.global_steps = 0
 
         # load checkpoint before doing anything
+        # NOTE: 3. 加载模型检查点和数据集 dataloader
         self._load_checkpoint()
 
         # perform validation before training
@@ -917,12 +949,14 @@ class RayPPOTrainer:
                 return
 
         # add tqdm
+        # NOTE: 4. 使用 tqdm 创建进度条，显示训练进度，并设置初始步数
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
         # we start from step 1
         self.global_steps += 1
         last_val_metrics = None
 
+        # NOTE: 5. 遍历配置的总 epoch 数和数据加载器，每个 train batch 更新多步
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 do_profile = self.global_steps in self.config.trainer.profile_steps if self.config.trainer.profile_steps is not None else False
@@ -940,6 +974,7 @@ class RayPPOTrainer:
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
                 # pop those keys for generation
+                # NOTE: 6. 从 batch 中分离出用于 rollout 的数据 (input_ids, attention_mask, position_ids)，保留其他数据用于后续处理
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
                 non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
                 if "multi_modal_data" in batch.non_tensor_batch:
@@ -955,6 +990,7 @@ class RayPPOTrainer:
 
                 is_last_step = self.global_steps >= self.total_training_steps
 
+                # NOTE: 7. 调用 ActorRolloutWorker 生成序列，并记录生成时间
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
@@ -967,6 +1003,7 @@ class RayPPOTrainer:
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
+                    # NOTE: 8. 处理 REMAX 基线（如果使用）：生成确定性基线序列，计算基线奖励，用于 REMAX 优势估计器
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, color="purple"):
                             gen_baseline_batch = deepcopy(gen_batch)
@@ -983,8 +1020,10 @@ class RayPPOTrainer:
 
                             del gen_baseline_batch, gen_baseline_output
 
+                    # NOTE: 9. 为每个样本分配唯一 ID，重复数据以对齐多次采样，计算响应掩码，并可选地进行批次平衡
                     batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
                     # repeat to align with repeated responses in rollout
+                    # NOTE: 重复 n 次
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
@@ -1000,6 +1039,7 @@ class RayPPOTrainer:
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
+                    # NOTE: 10. 根据配置使用奖励模型或自定义奖励函数计算 token 级别的奖励分数，支持同步和异步计算
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm:
@@ -1012,6 +1052,7 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
                     # recompute old_log_probs
+                    # NOTE: 11. 使用 megatron 基于训练开始前的 policy 重新计算 behaviour policy 的 log probabilities，用于重要性采样，同时计算熵值
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
@@ -1047,6 +1088,7 @@ class RayPPOTrainer:
                                 }
                             )
 
+                    # NOTE: 12. 使用 reference policy 计算 log probs，用于 KL 散度计算
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer("ref", timing_raw, color="olive"):
@@ -1057,11 +1099,13 @@ class RayPPOTrainer:
                             batch = batch.union(ref_log_prob)
 
                     # compute values
+                    # NOTE: 13. 使用 Critic 网络计算状态价值，用于优势函数估计
                     if self.use_critic:
                         with marked_timer("values", timing_raw, color="cyan"):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
 
+                    # NOTE: 14. 根据配置的优势估计器 (GAE、GRPO、REMAX 等) 计算优势函数，支持 KL 惩罚
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
@@ -1095,6 +1139,7 @@ class RayPPOTrainer:
                         )
 
                     # update critic
+                    # NOTE: 15. 使用计算出的优势函数更新 Critic 网络参数
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
                             critic_output = self.critic_wg.update_critic(batch)
@@ -1103,6 +1148,7 @@ class RayPPOTrainer:
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
+                        # NOTE: 16. 在 Critic 预热完成后，使用 PPO 损失函数更新 Actor 网络参数
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
@@ -1111,6 +1157,7 @@ class RayPPOTrainer:
                         metrics.update(actor_output_metrics)
 
                     # Log rollout generations if enabled
+                    # NOTE: 17. 将生成的序列、输入、输出和分数保存到指定目录
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
                         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
@@ -1127,6 +1174,7 @@ class RayPPOTrainer:
                             )
 
                     # validate
+                    # NOTE: 18. 根据配置的频率执行验证，计算验证指标并记录
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                         with marked_timer("testing", timing_raw, color="green"):
                             val_metrics: dict = self._validate()
@@ -1134,6 +1182,7 @@ class RayPPOTrainer:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
 
+                    # NOTE: 19. 根据配置的频率保存模型检查点
                     if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
                         with marked_timer("save_checkpoint", timing_raw, color="green"):
                             self._save_checkpoint()
@@ -1146,6 +1195,7 @@ class RayPPOTrainer:
                     }
                 )
                 # collect metrics
+                # NOTE: 20. 收集训练指标、时序指标和吞吐量指标，并记录到日志系统
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
@@ -1155,9 +1205,11 @@ class RayPPOTrainer:
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
+                # NOTE: 21. 更新进度条，递增全局步数，并在达到总训练步数时结束训练
                 progress_bar.update(1)
                 self.global_steps += 1
 
+                # NOTE: 22. 根据配置在特定步数启用/禁用性能分析，用于调试和优化
                 if do_profile:
                     self.actor_rollout_wg.stop_profile()
                     if self.use_reference_policy:

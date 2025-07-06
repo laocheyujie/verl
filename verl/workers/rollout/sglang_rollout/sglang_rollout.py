@@ -31,24 +31,11 @@ import sglang.srt.entrypoints.engine
 import torch
 import torch.distributed as dist
 from omegaconf import DictConfig
-from sglang.srt.managers.tokenizer_manager import (
-    ReleaseMemoryOccupationReqInput,
-    ResumeMemoryOccupationReqInput,
-    UpdateWeightsFromTensorReqInput,
-)
+from sglang.srt.managers.tokenizer_manager import ReleaseMemoryOccupationReqInput, ResumeMemoryOccupationReqInput, UpdateWeightsFromTensorReqInput
 from sglang.srt.openai_api.protocol import Tool
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import (
-    MultiprocessingSerializer,
-    assert_pkg_version,
-    get_ip,
-    get_open_port,
-    is_cuda,
-    maybe_set_triton_cache_manager,
-    set_prometheus_multiproc_dir,
-    set_ulimit,
-)
+from sglang.srt.utils import MultiprocessingSerializer, assert_pkg_version, get_ip, get_open_port, is_cuda, maybe_set_triton_cache_manager, set_prometheus_multiproc_dir, set_ulimit
 from tensordict import TensorDict
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.nn.utils.rnn import pad_sequence
@@ -160,6 +147,7 @@ class AsyncEngine(sglang.srt.entrypoints.engine.Engine):
         return await self.tokenizer_manager.update_weights_from_tensor(obj, None)
 
     async def flush_cache(self):
+        # NOTE: 模型参数更新后刷新 KV cache，因为之前的 KV cache 已经失效了
         return await self.tokenizer_manager.flush_cache()
 
 
@@ -244,6 +232,7 @@ class SGLangRollout(BaseRollout):
         self._device_mesh_cpu = device_mesh
         os.environ.setdefault("SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK", "true")
 
+        # NOTE: 通过 _initialize_tools() 初始化工具 schemas、map 和解析器，支持 Multi-turn 对话中的工具使用
         (
             self._tool_schemas,
             self._tool_map,
@@ -257,14 +246,19 @@ class SGLangRollout(BaseRollout):
 
         logger.info(f"tool_schemas: {self._tool_schemas}, tool_map: {self._tool_map}, tool_call_parser_type: {self._tool_call_parser_type}, sgl_tools: {self._sgl_tools}, function_call_parser: {self._function_call_parser}")
 
+        # NOTE: 初始化 SGLang 推理所需的分布式环境
         self._init_distributed_env(device_mesh_cpu=device_mesh, **kwargs)
 
+        # NOTE: 通过 _verify_config() 验证模型配置
         self._verify_config(model_hf_config=model_hf_config)
         # initialize the inference engine
+        # NOTE: 通过 _init_inference_engine() 初始化 SGLang 推理引擎
         self._init_inference_engine(trust_remote_code, actor_module, port)
 
+        # NOTE: 通过 _init_sampling_params() 初始化生成序列的采样参数
         self._init_sampling_params(**kwargs)
 
+        # NOTE: 设置 Tokenizer 和 padding token ID
         self.tokenizer = tokenizer
         self.pad_token_id = tokenizer.pad_token_id
 
@@ -415,14 +409,19 @@ class SGLangRollout(BaseRollout):
         if config.multi_turn.tool_config_path is None:
             return [], {}, None, [], None
 
+        # NOTE: 从配置文件加载工具并初始化工具列表
         tools_config_file = config.multi_turn.tool_config_path
         tool_list = initialize_tools_from_config(tools_config_file)
 
         logger.info(f"Initialize tools from configuration.: tool_list: {tool_list}")
+        # NOTE: 创建 OpenAI 格式的工具 schema 和工具名称到工具对象的映射
         tool_schemas = [tool.get_openai_tool_schema().model_dump() for tool in tool_list]
         tool_map = {tool.name: tool for tool in tool_list}
+        # NOTE: 根据 Tokenizer 类型确定工具调用解析器
         tool_call_parser_type = get_tool_call_parser_type(tokenizer)
+        # NOTE: 为 SGLang 创建 Tool 对象
         sgl_tools = [Tool.model_validate(tool_schema) for tool_schema in tool_schemas]
+        # NOTE: 实例化 FunctionCallParser
         function_call_parser = FunctionCallParser(
             sgl_tools,
             tool_call_parser_type,
@@ -469,7 +468,9 @@ class SGLangRollout(BaseRollout):
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
         if self.config.multi_turn.enable:
+            # NOTE: 如果是用了 mutli-turn 训练，则将 batch 的 requests 拆为单个 request，调用 _req_level_generate_sequences
             return self._req_level_generate_sequences(prompts, **kwargs)
+        # NOTE: 不调用 tool 的单轮 RL，仍旧组 batch 直接发送
         return self._batch_level_generate_sequences(prompts, **kwargs)
 
     @GPUMemoryLogger(role="sglang rollout", logger=logger)
@@ -690,6 +691,7 @@ class SGLangRollout(BaseRollout):
         finish_reason_type = None
         output = None
 
+        # NOTE: 通过一个 while 循环来处理多轮对话
         current_turns = 0
         while current_turns < self.config.multi_turn.max_turns:
             if _req.state == AsyncRolloutRequestStateEnum.PENDING:
@@ -856,6 +858,7 @@ class SGLangRollout(BaseRollout):
         is_validate = prompts.meta_info.get("validate", False)
         tgt_device = prompts.batch["input_ids"].device
         if self._tp_rank == 0:
+            # NOTE: 如果当前是 tp rank 0，则将一整个 batch 的 prompts 预处理成单个异步请求，并并发执行这些请求以生成序列
             req_list = self._preprocess_prompt_to_async_rollout_requests(
                 prompts,
                 n=1 if is_validate else self.config.n,
@@ -866,11 +869,14 @@ class SGLangRollout(BaseRollout):
                     *[self._async_rollout_a_request(req, do_sample, is_validate, **kwargs) for req in req_list],
                 )
             )
+            # NOTE: rollout 的返回顺序是乱序的，因此需要按照 batch ID 和在 batch 内的 offset 来对返回值重新排序
             sorted_output_req_list = sorted(output_req_list, key=lambda x: (x.batch_data_id, x.rollout_offset))
         else:
+            # NOTE: 如果不是 tp rank 0，则将输出请求列表设置为 None
             sorted_output_req_list = None
 
         dist.barrier()
+        # NOTE: 使用分布式通信，将 tp rank 0 生成的排序后的请求列表广播给所有其他 rank
         [sorted_output_req_list] = broadcast_pyobj(
             data=[sorted_output_req_list],
             rank=self._rank,
@@ -879,6 +885,7 @@ class SGLangRollout(BaseRollout):
             force_cpu_device=False,
         )
         # Construct the batch data
+        # NOTE: 提取 prompt IDs, response IDs, attention masks, position IDs, loss masks, 原始消息和 reward scores
         prompt_ids, response_ids = [], []
         prompt_attention_mask, response_attention_mask = [], []
         prompt_position_ids, response_position_ids = [], []
@@ -917,6 +924,8 @@ class SGLangRollout(BaseRollout):
             messages.append({"messages": req.messages})
             reward_scores.append(req.reward_scores)
 
+        # NOTE: 使用 padding token 对 prompt IDs 和 response IDs 进行填充，使其长度一致
+        # NOTE: prompt_ids 使用 left pad, response_ids 使用 right pad
         prompt_ids = pad_sequence(
             prompt_ids,
             batch_first=True,
@@ -953,12 +962,14 @@ class SGLangRollout(BaseRollout):
         if response_loss_mask.shape[1] < self.config.response_length:
             response_loss_mask = pad_sequence_to_length(response_loss_mask, self.config.response_length, 0)
 
+        # NOTE: 将填充后的 prompt_ids, response_ids, attention_masks, position_ids, loss_mask 在最后一个维度上进行拼接，形成完整的序列数据
         input_ids = torch.cat((prompt_ids, response_ids), dim=-1)
         attention_mask = torch.cat((prompt_attention_mask, response_attention_mask), dim=-1)
         position_ids = torch.cat((prompt_position_ids, response_position_ids), dim=-1)
         loss_mask = torch.cat((prompt_loss_mask, response_loss_mask), dim=-1)
 
         # Construct the batch data
+        # NOTE: 将处理后的 prompts 和 responses 存储到 TensorDict 对象中，并设置批次大小
         batch = TensorDict(
             {
                 "prompts": prompt_ids,
@@ -976,6 +987,7 @@ class SGLangRollout(BaseRollout):
             loop = asyncio.get_event_loop()
             loop.run_until_complete(self._engine.flush_cache())
 
+        # NOTE: 将包含批次化张量数据的 TensorDict 和包含原始消息及奖励分数的字典封装到 DataProto 对象中并返回
         return DataProto(
             batch=batch,
             non_tensor_batch={
@@ -987,19 +999,25 @@ class SGLangRollout(BaseRollout):
     def _preprocess_prompt_to_async_rollout_requests(self, prompts: DataProto, n: int) -> list[AsyncRolloutRequest]:
         assert "raw_prompt" in prompts.non_tensor_batch, "need data.return_raw_chat=True, due to no official way do parse_messages"
         req_list = []
+        # NOTE: 首先拆开 batch 中的每个 prompt
         for data_idx, raw_prompt in enumerate(prompts.non_tensor_batch["raw_prompt"]):
+            # NOTE: 内层循环为每个 prompt 生成 n 个不同的序列
             for rollout_offset in range(n):
                 if self._tool_schemas:
+                    # NOTE: 当配置了工具时，_input_ids 和 _attention_mask 被设为 None，因为工具调用需要动态构建输入
                     _tools_kwargs = prompts.non_tensor_batch["tools_kwargs"][data_idx]
                     _tool_schemas = [self._tool_map[k].get_openai_tool_schema() for k in _tools_kwargs.keys()]
                     _input_ids = None
                     _attention_mask = None
                 else:
+                    # NOTE: 没有配置工具的话，使用 _pre_process_inputs 函数处理预处理的 token IDs，去除左填充
                     _input_ids = _pre_process_inputs(self.pad_token_id, prompts.batch["input_ids"][data_idx])
                     _attention_mask = _pre_process_inputs(0, prompts.batch["attention_mask"][data_idx])
                     _tools_kwargs = {}
                     _tool_schemas = None
 
+                # NOTE: 每个生成的请求都有唯一的 batch_data_id 和 rollout_offset 标识
+                # NOTE: 每个请求对象包含状态管理、工具配置、序列长度限制、tokenizer 配置等元数据，为后续的异步处理提供完整信息
                 req = AsyncRolloutRequest(
                     batch_data_id=data_idx,
                     rollout_offset=rollout_offset,

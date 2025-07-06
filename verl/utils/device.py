@@ -35,6 +35,7 @@ def get_device_name() -> str:
     Returns:
         device
     """
+    # NOTE: 获取不同的设备名称
     if is_cuda_available:
         device = "cuda"
     elif is_npu_available:
@@ -49,6 +50,7 @@ def get_torch_device() -> any:
     Returns:
         module: The corresponding torch device namespace, or torch.cuda if not found.
     """
+    # NOTE: 获取不同的设备对象
     device_name = get_device_name()
     try:
         return getattr(torch, device_name)
@@ -70,6 +72,7 @@ def get_nccl_backend() -> str:
     Returns:
         nccl backend type string.
     """
+    # NOTE: 获取nccl后端名称
     if is_cuda_available:
         return "nccl"
     elif is_npu_available:

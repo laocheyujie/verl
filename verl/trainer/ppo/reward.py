@@ -73,6 +73,7 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     from verl.workers.reward_manager import get_reward_manager_cls
 
     # The list of pre-defined reward managers are defined in `verl/workers/reward_manager/`:
+    # external: ExternalRewardManager
     # naive: NaiveRewardManager
     # prime: PrimeRewardManager
     # batch: BatchRewardManager
@@ -83,6 +84,13 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     reward_manager_name = config.reward_model.get("reward_manager", "naive")
     reward_manager_cls = get_reward_manager_cls(reward_manager_name)
 
+    if reward_manager_name == "external":
+        reward_api = config.reward_model.get("reward_api")
+        if not reward_api:
+            raise ValueError("reward_api is required for external reward manager")
+        reward_kwargs["reward_api"] = reward_api
+        reward_kwargs["reward_api_method"] = config.reward_model.get("reward_api_method", "POST")
+        
     # Try to get a custom reward function based on the configuration
     compute_score = get_custom_reward_fn(config)
     final_compute_score = compute_score

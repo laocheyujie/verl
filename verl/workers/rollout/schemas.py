@@ -111,6 +111,7 @@ class AsyncRolloutRequest(BaseModel):
 
         values["messages"] = [Message.model_validate(msg) for msg in messages]
 
+        # NOTE: 使用 tokenizer 的 chat_template 处理消息，初始化所有序列相关字段 (input_ids, attention_mask, position_ids, loss_mask)，计算生成提示的位置信息
         tools = [tool.model_dump() for tool in tool_schemas] if (tool_schemas := values.get("tool_schemas", [])) else None
         tokens_without_prompt = tokenizer.apply_chat_template(messages, tools=tools, add_generation_prompt=False, tokenize=True)
         if not values.get("input_ids") or not values.get("attention_mask"):
@@ -132,6 +133,7 @@ class AsyncRolloutRequest(BaseModel):
         """
         Update the input_ids, attention_mask, position_ids, and loss_mask of the request in additive manner.
         """
+        # NOTE: 以增量方式更新序列信息，自动计算新的 position_ids，维护数据一致性验证
         self.input_ids += new_input_ids
         attention_mask = [int(attention_mask)] * len(new_input_ids)
         self.attention_mask += attention_mask
@@ -142,6 +144,7 @@ class AsyncRolloutRequest(BaseModel):
             {len(self.attention_mask)=}, {len(self.position_ids)=}, {len(self.loss_mask)=}"""
 
     def get_generation_prompt_ids(self, tokenizer: PreTrainedTokenizer) -> list[int]:
+        # NOTE: 根据配置决定是否使用推理时的 chat_template，动态添加生成提示到输入序列
         generation_prompt_ids = [] if self.input_ids[-len(self.generation_prompt_ids) :] == self.generation_prompt_ids else self.generation_prompt_ids
         if generation_prompt_ids:
             self._update_input_ids(generation_prompt_ids, attention_mask=True, loss_mask=False)
@@ -157,6 +160,7 @@ class AsyncRolloutRequest(BaseModel):
         content: str,
         tool_calls: Optional[List[OpenAIFunctionToolCall]] = None,
     ) -> None:
+        # NOTE: 添加助手回复到消息历史，更新输入序列以包含新的回复内容，支持工具调用信息
         self.messages.append(Message(role="assistant", content=content, tool_calls=tool_calls))
         content = tokenizer.apply_chat_template([*BASE_CHAT_HISTORY, self.messages[-1]], tools=([tool.model_dump() for tool in self.tool_schemas] if self.tool_schemas else None), add_generation_prompt=False, tokenize=False)
         content_ids = tokenizer.encode(content[self.base_conv_with_gen_prompt_end_pos :], add_special_tokens=False)
@@ -174,6 +178,7 @@ class AsyncRolloutRequest(BaseModel):
         """
         metrics: should be a dict of tools_name -> Any
         """
+        # NOTE: 加工具响应到消息历史，更新输入序列但不标记为损失计算部分
         if self.metrics.get(tool_id) is None:
             self.metrics[tool_id] = []
         self.metrics[tool_id].append(metrics)
@@ -184,6 +189,7 @@ class AsyncRolloutRequest(BaseModel):
         reward_scores: Dict[str, float],
         finish_reason_type: FinishReasonTypeEnum = FinishReasonTypeEnum.STOP,
     ) -> None:
+        # NOTE: 完成请求处理，执行 tokenization 一致性检查，清理生成提示，截断输出序列到合理长度
         self.state = AsyncRolloutRequestStateEnum.COMPLETED
         self.reward_scores = reward_scores
         if self.enable_tokenization_sanity_check:
@@ -211,6 +217,7 @@ class AsyncRolloutRequest(BaseModel):
             {len(self.attention_mask)=}, {len(self.position_ids)=}, {len(self.loss_mask)=}"""
 
     def truncate_output_ids(self, tokenizer: PreTrainedTokenizer) -> None:
+        # NOTE: 确保所有序列长度不超过限制，分别处理 input_ids, attention_mask, position_ids, loss_mask
         self.input_ids = self.input_ids[: self.max_model_len]
         self.attention_mask = self.attention_mask[: self.max_model_len]
         self.position_ids = self.position_ids[: self.max_model_len]

@@ -1,4 +1,5 @@
 hydra:
+  # NOTE: 去 verl/trainer/config 目录下寻找 ppo_trainer.yaml 作为基础配置，并且覆盖
   searchpath:
     - file://verl/trainer/config
 
