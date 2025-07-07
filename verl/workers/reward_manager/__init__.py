@@ -20,4 +20,12 @@ from .prime import PrimeRewardManager
 from .registry import get_reward_manager_cls, register  # noqa: I001
 
 # Note(haibin.lin): no need to include all reward managers here in case of complicated dependencies
-__all__ = ["ExternalRewardManager", "BatchRewardManager", "DAPORewardManager", "NaiveRewardManager", "PrimeRewardManager", "ExternalRewardManager", "register", "get_reward_manager_cls"]
+__all__ = [
+    "BatchRewardManager",
+    "DAPORewardManager",
+    "NaiveRewardManager",
+    "PrimeRewardManager",
+    "register",
+    "get_reward_manager_cls",
+    "ExternalRewardManager",
+]

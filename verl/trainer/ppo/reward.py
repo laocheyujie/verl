@@ -22,6 +22,15 @@ from verl import DataProto
 from verl.utils.reward_score import default_compute_score
 
 
+def _call_with_kwargs(raw_fn, extra_kwargs, *args, **kwargs):
+    """Calls `raw_fn` by merging `extra_kwargs` into call-time `kwargs`, with `extra_kwargs` taking precedence.
+
+    This function is used to merge additional keyword arguments with the original function's arguments.
+    """
+    merged_kwargs = {**kwargs, **extra_kwargs}
+    return raw_fn(*args, **merged_kwargs)
+
+
 def get_custom_reward_fn(config):
     import importlib.util
     import sys
@@ -51,10 +60,7 @@ def get_custom_reward_fn(config):
 
     reward_kwargs = dict(reward_fn_config.get("reward_kwargs", {}))
 
-    def wrapped_fn(*args, **kwargs):
-        return raw_fn(*args, **kwargs, **reward_kwargs)
-
-    return wrapped_fn
+    return partial(_call_with_kwargs, raw_fn, reward_kwargs)
 
 
 def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
@@ -99,12 +105,18 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
         # NOTE: 如果用户没有提供自定义的奖励函数，则使用默认的奖励函数
         sandbox_config = config.reward_model.get("sandbox_fusion")
         sandbox_url = sandbox_config.get("url") if sandbox_config else None
+        memory_limit_mb = sandbox_config.get("memory_limit_mb", 1024)
         if sandbox_url:
             # NOTE: 使用沙盒融合 API 计算奖励
             sandbox_manager = multiprocessing.Manager()
             # Create a semaphore to control concurrent access to the sandbox
             _concurrent_semaphore = sandbox_manager.Semaphore(sandbox_config.get("max_concurrent", 64))
-            final_compute_score = partial(default_compute_score, sandbox_fusion_url=sandbox_url, concurrent_semaphore=_concurrent_semaphore)
+            final_compute_score = partial(
+                default_compute_score,
+                sandbox_fusion_url=sandbox_url,
+                concurrent_semaphore=_concurrent_semaphore,
+                memory_limit_mb=memory_limit_mb,
+            )
         else:
             # NOTE: 使用单独的进程计算奖励
             final_compute_score = default_compute_score
