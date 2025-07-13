@@ -10,7 +10,10 @@ from pydantic import BaseModel
 
 
 def save_jsonl(save_path, data):
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    dir_path = os.path.dirname(save_path)
+    if dir_path:
+        os.makedirs(dir_path, exist_ok=True)
+
     with open(save_path, "a", encoding="utf-8") as f:
         if isinstance(data, list):
             for item in data:
@@ -164,6 +167,12 @@ def get_score(prompt_str: str, response_str: str, model: str = "qwen") -> float:
     total_score = direct_score + title_score + outline_score + total_count_score
     total_score = round(total_score, 2)
     extra_info = {
+        "query_title": q["title"],
+        "response_title": res["title"],
+        "query_outlines": q["outlines"],
+        "response_outlines": res["outlines"],
+        "query_total_count": q["total_count"],
+        "response_total_count": res["total_count"],
         "direct_score": round(direct_score, 2),
         "title_score": round(title_score, 2),
         "outline_score": round(outline_score, 2),
@@ -176,25 +185,30 @@ def get_score(prompt_str: str, response_str: str, model: str = "qwen") -> float:
 async def reward(request: RewardRequest):
     prompt_str = request.prompt_str
     response_str = request.response_str
+    if isinstance(response_str, str):
+        response_str = response_str.replace("<|im_end|>", "").strip()
     model = request.model or "qwen"
     # sequence_str = request.sequence_str
     # ground_truth = request.ground_truth
     # extra_info = request.extra_info
     # valid_response_length = request.valid_response_length
-    
+
     score, extra_info = get_score(prompt_str, response_str, model)
-    res = {
-        "score": score,
-        "extra_info": extra_info,
-    }
     log_data = {
         "prompt_str": prompt_str,
         "response_str": response_str,
         "score": score,
-        "extra_info": extra_info,
+        **extra_info,
+    }
+    save_jsonl("verl_rm.jsonl", log_data)
+    res = {
+        "score": score,
+        "direct_score": extra_info["direct_score"],
+        "title_score": extra_info["title_score"],
+        "outline_score": extra_info["outline_score"],
+        "total_count_score": extra_info["total_count_score"]
     }
     logger.info(res)
-    save_jsonl("verl_rm.jsonl", log_data)
     return res
 
 

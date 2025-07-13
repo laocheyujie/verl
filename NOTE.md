@@ -103,3 +103,24 @@ metrics.update(actor_output_metrics)
 logger.log(data=metrics, step=self.global_steps)
 ```
 
+## 权重转换
+> https://verl.readthedocs.io/en/latest/advance/checkpoint.html#convert-fsdp-and-megatron-checkpoints-to-huggingface-format-model
+
+### FSDP to HF
+.pt -> .safetensor
+```bash
+python -m verl.model_merger merge \
+    --backend fsdp \
+    --local_dir checkpoints/verl_fsdp_gsm8k_examples/qwen2_5_0b5_fsdp_saveload/global_step_1/actor \
+    --target_dir /path/to/merged_hf_model
+```
+
+
+### Megatron to HF
+```bash
+python -m verl.model_merger merge \
+    --backend megatron \
+    --tie-word-embedding \
+    --local_dir checkpoints/verl_megatron_gsm8k_examples/qwen2_5_0b5_megatron_saveload/global_step_1/actor \
+    --target_dir /path/to/merged_hf_model
+```

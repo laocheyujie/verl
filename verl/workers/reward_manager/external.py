@@ -34,11 +34,6 @@ class ExternalRewardScoreInput:
     extra_info: str
     valid_response_length: int
 
-@dataclass
-class ScoreFuncOutput:
-    score: float
-    extra_info: dict
-
 
 async def async_call_online_reward_model(url: str, method: str = "POST", **kwargs):
     try:
@@ -50,31 +45,26 @@ async def async_call_online_reward_model(url: str, method: str = "POST", **kwarg
             if method == "POST":
                 async with session.post(url, headers=headers, json=kwargs) as response:
                     res = await response.json()
-                    score = res.get("score")
-                    extra_info = res.get("extra_info", {})
-                    return float(score), extra_info
+                    return res
             elif method == "GET":
                 async with session.get(url, headers=headers, params=kwargs) as response:
                     res = await response.json()
-                    score = res.get("score")
-                    extra_info = res.get("extra_info", {})
-                    return float(score), extra_info
+                    return res
             else:
                 raise ValueError(f"Invalid reward api method: {method}")
-    except Exception:
-        return 0.0, {}
+    except Exception as e:
+        print(f"Error calling online reward model: {str(e)}")
+        return {"score": 0.0, "extra_info": {}}
 
 
 def call_online_reward_model(url: str, method: str = "POST", **kwargs):
     try:
         # Use the async function in a synchronous context
         loop = asyncio.get_event_loop()
-        score, extra_infos = loop.run_until_complete(
-            async_call_online_reward_model(url, method, **kwargs)
-        )
-        return score, extra_infos
+        res = loop.run_until_complete(async_call_online_reward_model(url, method, **kwargs))
+        return res
     except Exception:
-        return 0.0, {}
+        return {"score": 0.0, "extra_info": {}}
 
 
 default_compute_score = async_call_online_reward_model
@@ -99,13 +89,11 @@ class ExternalRewardManager:
         self.compute_score = default_compute_score
         self.reward_fn_key = reward_fn_key
 
-    async def async_compute_score(
-        self, input_item: ExternalRewardScoreInput
-    ) -> ScoreFuncOutput:
+    async def async_compute_score(self, input_item: ExternalRewardScoreInput) -> dict:
         """Asynchronous processing of a single scoring request"""
         try:
             # NOTE: 使用异步的 async_call_online_reward_model 函数，以提高异步性能
-            score, extra_info = await self.compute_score(
+            res = await self.compute_score(
                 url=self.reward_api,
                 method=self.reward_api_method,
                 data_source=input_item.data_source,
@@ -114,16 +102,16 @@ class ExternalRewardManager:
                 sequence_str=input_item.sequence_str,
                 ground_truth=input_item.ground_truth,
                 extra_info=input_item.extra_info,
-                valid_response_length=input_item.valid_response_length,
+                valid_response_length=input_item.valid_response_length.item(),
             )
-            return ScoreFuncOutput(score=score, extra_info=extra_info)
+            return res
         except Exception as e:
             print(f"Error computing score: {str(e)}")
-            return ScoreFuncOutput(score=0.0, extra_info={})
+            return {"score": 0.0, "extra_info": {}}
 
     async def batch_compute_scores(
         self, input_list: List[ExternalRewardScoreInput], max_concurrency: int = 30
-    ) -> List[ScoreFuncOutput]:
+    ) -> List[dict]:
         """Parallel processing of all scoring requests, limiting the maximum number of concurrent requests"""
         # Create a semaphore to control the number of concurrent requests
         semaphore = asyncio.Semaphore(max_concurrency)
@@ -205,13 +193,14 @@ class ExternalRewardManager:
             response_str = score_input_list[i].response_str
             sequences_str = score_input_list[i].sequence_str
             valid_response_length = score_input_list[i].valid_response_length
-            score = score_output_list[i].score
+            score = score_output_list[i]
             
             if isinstance(score, dict):
                 reward = score["score"]
                 # Store the information including original reward
                 for key, value in score.items():
-                    reward_extra_info[key].append(value)
+                    if isinstance(value, float) or isinstance(value, int):
+                        reward_extra_info[key].append(value)
             else:
                 reward = score
 
@@ -232,9 +221,6 @@ class ExternalRewardManager:
                         print(f"[{key}]", value)
                 else:
                     print("[score]", score)
-                    
-        for output in score_output_list:
-            reward_extra_info.update(output.extra_info)
 
         if return_dict:
             return {

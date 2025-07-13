@@ -127,3 +127,4 @@ outputs
 
 
 /data/
+tensorboard_log/

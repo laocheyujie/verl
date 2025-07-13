@@ -93,6 +93,8 @@ class vLLMRollout(BaseRollout):
             **kwargs: train_tp, for Megatron Backend to initialize hybrid engine (zero redundancy) process group
         """
         super().__init__()
+        # NOTE: actor_rollout_ref.rollout 里的配置
+        # NOTE: 可以在这里加 enable_thinking 的配置
         self.config = config
 
         tensor_parallel_size = self.config.get("tensor_model_parallel_size", 1)

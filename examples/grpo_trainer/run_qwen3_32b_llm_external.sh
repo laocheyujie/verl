@@ -1,23 +1,21 @@
 #!/bin/bash
 # -*- coding: utf-8 -*-
 
-# 增加系统资源限制，防止资源耗尽
-# ulimit -n 65536        # 增加文件描述符限制
-# ulimit -u 32768        # 增加进程/线程数限制
-# export OMP_NUM_THREADS=4  # 限制OpenMP线程数
+NOW=$(date +%Y%m%d%H%M)
+MODEL_NAME=Qwen3-32B
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-NOW=$(date +%Y%m%d%H%M)
-MODEL_NAME=Qwen3-8B
+
+export WANDB_DIR=VERL-External-${MODEL_NAME}
+export WANDB_PROJECT=${WANDB_DIR}
+export WANDB_EXP=${MODEL_NAME}-${NOW}
+export WANDB_API_KEY=b7abd3e3cc53f8f0897ea20ea3db64da0395d7fe
+export WANDB_INIT_TIMEOUT=1200
 
 export RAY_DEDUP_LOGS=0
 export HYDRA_FULL_ERROR=1
 export RAY_TMPDIR=/data/cheyujie/ray/tmp
 
-# export PYTHONPATH=/data/cheyujie/github_fork/verl:$PYTHONPATH
-# export VLLM_INITIALIZATION_MAX_GPU_UTILIZATION=0.4
-# export VLLM_ATTENTION_BACKEND=FLASH_ATTENTION
-# ray stoexport CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 
 data_dir=/data/cheyujie/github_fork/verl/data/aminer
 model_path=/data/cheyujie/code/all_in_one/models/huggingface/Qwen/${MODEL_NAME}
@@ -26,9 +24,9 @@ save_model_checkpoint=/data/cheyujie/experiments/$WANDB_EXP
 
 set -x
 
-nproc_per_gpu=8
+nproc_per_gpu=32
 nnodes=1
-ngpu_per_node=4
+ngpu_per_node=8
 num_gpus=$(( nnodes * ngpu_per_node ))
 total_procs=$(( nproc_per_gpu * nnodes * ngpu_per_node ))
 mini_batch_size=$(( total_procs ))
@@ -38,17 +36,12 @@ max_prompt_length=32768
 max_response_length=4096
 max_model_len=$(( max_prompt_length + max_response_length ))
 
-TP=2
+TP=4
 SP=2
 
 ray stop
-# ray start --head --node-ip-address=0.0.0.0 --port=6378 --dashboard-host=0.0.0.0 --dashboard-port=8265 --ray-debugger-external --num-cpus 64 --num-gpus $num_gpus --temp-dir=$RAY_TMPDIR
-
 
 echo "启动训练..."
-
-# actor_rollout_ref.actor.use_dynamic_bsz=True \
-# actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768 \
 
 python3 -m verl.trainer.main_ppo \
     ray_init.num_cpus=128 \
@@ -62,7 +55,6 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.shuffle=False \
-    data.enable_thinking=False \
     actor_rollout_ref.model.path=$model_path \
     actor_rollout_ref.model.use_shm=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
@@ -103,10 +95,12 @@ python3 -m verl.trainer.main_ppo \
     +reward_model.reward_api=http://127.0.0.1:8018/reward \
     +reward_model.reward_api_method=POST \
     trainer.critic_warmup=0 \
-    trainer.logger=['console'] \
+    trainer.logger=['console','wandb'] \
+    trainer.project_name=$WANDB_PROJECT \
+    trainer.experiment_name=$WANDB_EXP \
     trainer.default_local_dir=$save_model_checkpoint \
     trainer.n_gpus_per_node=${ngpu_per_node} \
     trainer.nnodes=${nnodes} \
-    trainer.save_freq=20 \
+    trainer.save_freq=10 \
     trainer.test_freq=5 \
-    trainer.total_epochs=3 $@
+    trainer.total_epochs=5 $@ 2>&1 | tee ${WANDB_PROJECT}.log

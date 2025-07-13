@@ -104,6 +104,9 @@ data:
     # the name of the curriculum class like `MySampler`
     class_name: null
 
+  # Whether to enable thinking
+  enable_thinking: False
+
 # config for actor, rollout and reference model
 actor_rollout_ref:
 
