@@ -32,19 +32,20 @@ from dataclasses import asdict
 
 from verl import DataProto
 from verl.protocol import all_gather_data_proto
-from verl.third_party.vllm import LLM
+from verl.third_party.vllm import LLM, VLLM_SLEEP_LEVEL
 from verl.third_party.vllm import parallel_state as vllm_ps
-from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.device import get_device_id, get_device_name, get_torch_device, set_expandable_segments
 from verl.utils.fsdp_utils import (
     fsdp_version,
     layered_summon_lora_params,
     load_fsdp_model_to_gpu,
     offload_fsdp_model_to_cpu,
 )
+from verl.utils.import_utils import deprecated
 from verl.utils.model import check_exclude_modules, check_target_modules, convert_weight_keys
 from verl.utils.profiler import GPUMemoryLogger, log_gpu_memory_usage, simple_timer
 from verl.utils.torch_functional import check_device_is_available
-from verl.utils.vllm_utils import TensorLoRARequest, VLLMHijack, is_version_ge, patch_vllm_moe_model_weight_loader
+from verl.utils.vllm import TensorLoRARequest, VLLMHijack, is_version_ge
 
 from .base import BaseShardingManager
 
@@ -52,7 +53,15 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+@deprecated()
 class FSDPVLLMShardingManager(BaseShardingManager):
+    """Sharding manager for FSDP models with vLLM inference engine integration.
+
+    Manages parameter synchronization between FSDP training models and vLLM
+    inference engines, handling both full parameters and LoRA adapters with
+    efficient memory management and device placement.
+    """
+
     @check_device_is_available()
     def __init__(
         self,
@@ -198,7 +207,14 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             else:
                 params = self.module.state_dict()
             params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+
+            if self.offload_param:
+                offload_fsdp_model_to_cpu(self.module)
             log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
+
+            # vllm need to set _set_allocator_settings to False
+            logger.debug("fsdp vllm sharding_manager _set_allocator_settings to False")
+            set_expandable_segments(False)
 
             if self.rollout_config.free_cache_engine:
                 if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
@@ -210,8 +226,6 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             self.update_params(params, peft_config=peft_config)
             log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
             del params
-            if self.offload_param:
-                offload_fsdp_model_to_cpu(self.module)
             get_torch_device().empty_cache()
 
             if (
@@ -230,12 +244,16 @@ class FSDPVLLMShardingManager(BaseShardingManager):
     @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
         if self.rollout_config.free_cache_engine:
-            self.inference_engine.sleep(level=1)
+            self.inference_engine.sleep(level=VLLM_SLEEP_LEVEL)
 
         self.module.train()
 
         # add empty cache after each compute
         get_torch_device().empty_cache()
+
+        # _set_allocator_settings to True is required by fsdp2 to avoid oom
+        logger.debug("fsdp vllm sharding_manager _set_allocator_settings to True")
+        set_expandable_segments(True)
 
         # restore random states
         if self.device_mesh is not None:
@@ -263,6 +281,16 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         return data.chunk(chunks=self.tp_size)[self.tp_rank]
 
     def update_params(self, updated_params, peft_config=None):
+        """Update model parameters in the vLLM inference engine.
+
+        Synchronizes parameters from the FSDP training model to the vLLM inference
+        engine, handling both full model parameters and LoRA adapters with proper
+        device placement and memory management.
+
+        Args:
+            updated_params (dict): Dictionary of parameter names to tensor values.
+            peft_config (optional): PEFT configuration for LoRA adapters.
+        """
         model = self.model_runner.model
         if peft_config:
             if self.base_sync_done:
@@ -280,6 +308,17 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             else:
 
                 def replace_lora_wrapper(k):
+                    """Replace LoRA parameter keys with base layer equivalents.
+
+                    Transforms LoRA parameter names to their corresponding base layer
+                    names for proper weight loading in vLLM when base model sync is not done.
+
+                    Args:
+                        k (str): Original parameter key name.
+
+                    Returns:
+                        str: Transformed parameter key for base layer.
+                    """
                     stacked_params = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
                     if k.endswith(".weight"):
                         module_k = k[: -len(".weight")]
@@ -300,6 +339,8 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                     return k
 
                 updated_params = {replace_lora_wrapper(k): v for k, v in updated_params.items()}
+
+        from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
         patch_vllm_moe_model_weight_loader(model)
         device = get_device_id()  # used when fsdp2 set cpu_offload_policy

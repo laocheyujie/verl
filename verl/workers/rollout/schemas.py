@@ -16,13 +16,13 @@ import difflib
 import logging
 import os
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional
 
 import torch
 from pydantic import BaseModel, ConfigDict, model_validator
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin
 
-from verl.tools.schemas import OpenAIFunctionToolCall, OpenAIFunctionToolSchema
+from verl.tools.schemas import OpenAIFunctionToolCall, OpenAIFunctionToolSchema, ToolResponse
 from verl.utils.model import compute_position_id_with_mask
 
 logger = logging.getLogger(__file__)
@@ -55,8 +55,8 @@ class FinishReasonTypeEnum(str, Enum):
 
 class Message(BaseModel):
     role: str
-    content: str | Dict[str, Any] | List[Dict[str, Any]]
-    tool_calls: Optional[List[OpenAIFunctionToolCall]] = None
+    content: str | dict[str, Any] | list[dict[str, Any]] | ToolResponse
+    tool_calls: Optional[list[OpenAIFunctionToolCall]] = None
 
 
 class AsyncRolloutRequestStateEnum(str, Enum):
@@ -86,15 +86,14 @@ class AsyncRolloutRequest(BaseModel):
     batch_data_id: int = 0
     rollout_offset: int = 0
     request_id: str
-    uid: str | None = ""
     state: AsyncRolloutRequestStateEnum
-    messages: List[Message]
-    multi_modal_keys: Optional[List[str]] = None
-    multi_modal_data: Optional[Dict[str, Any]] = None
-    multi_modal_inputs: Optional[Dict[str, torch.Tensor]] = None
-    tool_schemas: Optional[List[OpenAIFunctionToolSchema]] = None
-    tools_kwargs: Dict[str, Any] = {}
-    interaction_kwargs: Dict[str, Any] = {}
+    messages: list[Message]
+    multi_modal_keys: Optional[list[str]] = None
+    multi_modal_data: Optional[dict[str, Any]] = None
+    multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
+    tool_schemas: Optional[list[OpenAIFunctionToolSchema]] = None
+    tools_kwargs: dict[str, Any] = {}
+    interaction_kwargs: dict[str, Any] = {}
     input_ids: Optional[torch.Tensor] = None
     prompt_ids: Optional[torch.Tensor] = None
     response_ids: Optional[torch.Tensor] = None
@@ -107,11 +106,13 @@ class AsyncRolloutRequest(BaseModel):
     loss_mask: Optional[torch.Tensor] = None
     prompt_loss_mask: Optional[torch.Tensor] = None
     response_loss_mask: Optional[torch.Tensor] = None
-    reward_scores: Dict[str, float]
+    reward_scores: dict[str, float]
     max_prompt_len: int
     max_response_len: int = 8192
     max_model_len: int = 32768
-    metrics: Dict[str, List[Any]] = {}
+    metrics: dict[str, list[Any]] = {}
+    output_token_ids: torch.Tensor | None = None
+    rollout_log_probs: torch.Tensor | None = None
 
     use_inference_chat_template: bool
     tokenization_sanity_check_mode: TokenizationSanityCheckModeEnum
@@ -180,6 +181,9 @@ class AsyncRolloutRequest(BaseModel):
             if values["input_ids"].shape[-1] > max_prompt_len:
                 # Only log the warning to avoid truncating in the middle of generation prompt. Consider raising an
                 # error for this case in the future.
+                # Ensure batch_data_id exists with default value if not provided
+                if "batch_data_id" not in values:
+                    values["batch_data_id"] = cls.model_fields["batch_data_id"].default
                 logger.warning(
                     f"Prompt {values['batch_data_id']} has length {values['input_ids'].shape[-1]} "
                     f"which is greater than max_prompt_len {max_prompt_len} after applied chat template with tools."
@@ -220,10 +224,10 @@ class AsyncRolloutRequest(BaseModel):
 
     @staticmethod
     def _handle_apply_chat_template(
-        processing_class: Union[PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin],
-        messages: List[Message],
-        multi_modal_data: Dict[str, Any],
-        tools: Optional[List[OpenAIFunctionToolSchema]] = None,
+        processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
+        messages: list[Message],
+        multi_modal_data: dict[str, Any],
+        tools: Optional[list[OpenAIFunctionToolSchema]] = None,
         add_generation_prompt: bool = False,
         tokenize: bool = False,
         return_dict: bool = False,
@@ -256,10 +260,10 @@ class AsyncRolloutRequest(BaseModel):
 
     @staticmethod
     def _get_position_ids(
-        processing_class: Union[PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin],
+        processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        multi_modal_inputs: Optional[Dict[str, torch.Tensor]] = None,
+        multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
         # special case for qwen2vl
         is_qwen2vl = (
@@ -295,11 +299,11 @@ class AsyncRolloutRequest(BaseModel):
 
     def _update_input_ids(
         self,
-        processing_class: Union[PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin],
+        processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
         new_input_ids: torch.Tensor,
         attention_mask: bool,
         loss_mask: bool,
-        new_multi_modal_inputs: Optional[Dict[str, torch.Tensor]] = None,
+        new_multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None,
     ) -> None:
         """
         Update the input_ids, attention_mask, position_ids, and loss_mask of the request in additive manner.
@@ -331,7 +335,7 @@ class AsyncRolloutRequest(BaseModel):
         ), f"""Request {self.request_id} has different length of {self.input_ids.shape[-1]=}, 
             {self.attention_mask.shape[-1]=}, {self.position_ids.shape[-1]=}, {self.loss_mask.shape[-1]=}"""
 
-    def _update_multi_modal_inputs(self, new_multi_modal_inputs: Dict[str, torch.Tensor]) -> None:
+    def _update_multi_modal_inputs(self, new_multi_modal_inputs: dict[str, torch.Tensor]) -> None:
         """
         Update the multi_modal_inputs of the request in additive manner.
         """
@@ -344,8 +348,8 @@ class AsyncRolloutRequest(BaseModel):
             )
 
     def get_generation_prompt_ids(
-        self, processing_class: Union[PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin]
-    ) -> List[int]:
+        self, processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin
+    ) -> list[int]:
         """
         Get the generation prompt ids for rollout engine.
 
@@ -377,7 +381,7 @@ class AsyncRolloutRequest(BaseModel):
 
     def add_user_message(
         self,
-        processing_class: Union[PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin],
+        processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
         content: str,
     ) -> None:
         self.messages.append(Message(role="user", content=content))
@@ -393,68 +397,49 @@ class AsyncRolloutRequest(BaseModel):
 
     def add_assistant_message(
         self,
-        processing_class: Union[PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin],
+        processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
         content: str,
-        tool_calls: Optional[List[OpenAIFunctionToolCall]] = None,
+        content_ids: Optional[torch.Tensor] = None,
+        tool_calls: Optional[list[OpenAIFunctionToolCall]] = None,
     ) -> None:
         # NOTE: 添加助手回复到消息历史，更新输入序列以包含新的回复内容，支持工具调用信息
         self.messages.append(Message(role="assistant", content=content, tool_calls=tool_calls))
+        if content_ids is None:
+            messages = [*BASE_CHAT_HISTORY, self.messages[-1]]
+            tools = [tool.model_dump() for tool in self.tool_schemas] if self.tool_schemas else None
 
-        messages = [*BASE_CHAT_HISTORY, self.messages[-1]]
-        tools = [tool.model_dump() for tool in self.tool_schemas] if self.tool_schemas else None
-
-        # We don't need to pass multi_modal_data here because we don't have any multi-modal data from Engine
-        # Inference, it is pure text.
-        content_ids = self._handle_apply_chat_template(
-            processing_class, messages, multi_modal_data={}, tools=tools, add_generation_prompt=False, tokenize=True
-        )[..., self.base_conv_with_gen_prompt_end_pos :]
+            # We don't need to pass multi_modal_data here because we don't have any multi-modal data from Engine
+            # Inference, it is pure text.
+            content_ids = self._handle_apply_chat_template(
+                processing_class, messages, multi_modal_data={}, tools=tools, add_generation_prompt=False, tokenize=True
+            )[..., self.base_conv_with_gen_prompt_end_pos :]
         self._update_input_ids(processing_class, content_ids, attention_mask=True, loss_mask=True)
 
     def add_tool_response_messages(
         self,
-        processing_class: Union[PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin],
-        contents: list[str | Dict[str, Any]],
+        processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
+        contents: list[ToolResponse],
     ) -> None:
-        if not contents:
+        if not contents or all(content.is_empty() for content in contents):
             return
         # We also handle the case when tool returns image
         # We require the processing of the image and video to be done at tool.execute() level
         delta_multi_modal_data = {key: [] for key in self.multi_modal_keys}
         for content in contents:
-            if isinstance(content, dict):
+            if content.is_text_only():
+                self.messages.append(Message(role="tool", content=content.text))
+            else:
                 content_list = []
                 # When we update multi_model_keys, we also need to update this logic
-                if "image" in content:
-                    if not isinstance(content["image"], list):
-                        raise ValueError(
-                            f"Image must be a list, but got {type(content['image'])}. Please check the tool.execute(). "
-                            f"For single images, wrap in a list: [image]. "
-                            f"Example: {{'image': [img1]}} or {{'image': [img1, img2, ...]}}."
-                        )
-
-                    content_list.extend([{"type": "image"} for _ in content["image"]])
-                    delta_multi_modal_data["image"].extend(content["image"])
-                if "video" in content:
-                    if not isinstance(content["video"], list):
-                        raise ValueError(
-                            f"Video must be a list, but got {type(content['video'])}. Please check the tool.execute(). "
-                            f"For single videos, wrap in a list: [video]. "
-                            f"Example: {{'video': [video1]}} or {{'video': [video1, video2, ...]}}."
-                        )
-
-                    content_list.extend([{"type": "video"} for _ in content["video"]])
-                    delta_multi_modal_data["video"].extend(content["video"])
-                if "text" in content:
-                    content_list.append({"type": "text", "text": content["text"]})
-                for key in content:
-                    if key not in ["image", "video", "text"]:
-                        logger.warning(
-                            f"Tool response message contains unexpected key: {key} "
-                            f"while we only support `image`, `video`, and `text`."
-                        )
+                if content.image:
+                    content_list.extend([{"type": "image"} for _ in content.image])
+                    delta_multi_modal_data["image"].extend(content.image)
+                if content.video:
+                    content_list.extend([{"type": "video"} for _ in content.video])
+                    delta_multi_modal_data["video"].extend(content.video)
+                if content.text:
+                    content_list.append({"type": "text", "text": content.text})
                 self.messages.append(Message(role="tool", content=content_list))
-            else:
-                self.messages.append(Message(role="tool", content=content))
 
         messages = [*BASE_CHAT_HISTORY, *self.messages[-len(contents) :]]
         tools = [tool.model_dump() for tool in self.tool_schemas] if self.tool_schemas else None
@@ -479,6 +464,11 @@ class AsyncRolloutRequest(BaseModel):
         multi_modal_inputs = content_info.copy()
         multi_modal_inputs.pop("input_ids", None)
         multi_modal_inputs.pop("attention_mask", None)
+
+        # chat templates include generation prompt tokens (e.g., "<im_start>assistant\n")
+        # So when tool response is added, we need to explicitly remove these tokens.
+        self._remove_generation_prompt_ids_if_present()
+
         self._update_input_ids(
             processing_class,
             content_ids,
@@ -498,11 +488,11 @@ class AsyncRolloutRequest(BaseModel):
 
     def _get_prompt_diffs(
         self,
-        processing_class: Union[PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin],
+        processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
         full_prompt_ids: torch.Tensor,
         current_prompt_ids: torch.Tensor,
         diff_surrounding_chars: int = 10,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Get differences between full prompt and current prompt with surrounding context.
 
         This function helps debug tokenization mismatches by showing the differences between
@@ -553,10 +543,20 @@ class AsyncRolloutRequest(BaseModel):
             )
         return diffs
 
+    def _remove_generation_prompt_ids_if_present(self) -> None:
+        """
+        Remove generation prompt IDs from input tensors if they are present at the end.
+        """
+        if self.input_ids[..., -self.generation_prompt_ids.shape[-1] :].eq(self.generation_prompt_ids).all():
+            self.input_ids = self.input_ids[..., : -self.generation_prompt_ids.shape[-1]]
+            self.attention_mask = self.attention_mask[..., : -self.generation_prompt_ids.shape[-1]]
+            self.position_ids = self.position_ids[..., : -self.generation_prompt_ids.shape[-1]]
+            self.loss_mask = self.loss_mask[..., : -self.generation_prompt_ids.shape[-1]]
+
     def finalize(
         self,
-        processing_class: Union[PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin],
-        reward_scores: Dict[str, List[float]],
+        processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
+        reward_scores: dict[str, list[float]],
         finish_reason_type: FinishReasonTypeEnum = FinishReasonTypeEnum.STOP,
     ) -> None:
         # NOTE: 完成请求处理，执行 tokenization 一致性检查，清理生成提示，截断输出序列到合理长度
@@ -565,11 +565,7 @@ class AsyncRolloutRequest(BaseModel):
 
         # In case we failed to generate the assistant message and the generation prompt ids were already added to
         # input_ids, remove them from the end of input_ids
-        if self.input_ids[..., -self.generation_prompt_ids.shape[-1] :].eq(self.generation_prompt_ids).all():
-            self.input_ids = self.input_ids[..., : -self.generation_prompt_ids.shape[-1]]
-            self.attention_mask = self.attention_mask[..., : -self.generation_prompt_ids.shape[-1]]
-            self.position_ids = self.position_ids[..., : -self.generation_prompt_ids.shape[-1]]
-            self.loss_mask = self.loss_mask[..., : -self.generation_prompt_ids.shape[-1]]
+        self._remove_generation_prompt_ids_if_present()
 
         self.response_ids = self.input_ids[..., self.prompt_ids.shape[-1] :]
 
@@ -666,7 +662,7 @@ class AsyncRolloutRequest(BaseModel):
             {self.attention_mask.shape[-1]=}, {self.position_ids.shape[-1]=}, {self.loss_mask.shape[-1]=}"""
 
     def truncate_output_ids(
-        self, processing_class: Union[PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin]
+        self, processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin
     ) -> None:
         # NOTE: 确保所有序列长度不超过限制，分别处理 input_ids, attention_mask, position_ids, loss_mask
         self.input_ids = self.input_ids[..., : self.max_model_len]

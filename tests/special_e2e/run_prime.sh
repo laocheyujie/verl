@@ -5,7 +5,7 @@ NUM_GPUS=${NUM_GPUS:-8}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+#huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 TRAIN_FILES=${TRAIN_FILES:-${HOME}/data/gsm8k/train.parquet}
 VAL_FILES=${VAL_FILES:-${HOME}/data/gsm8k/test.parquet}
@@ -62,7 +62,7 @@ python3 -m recipe.prime.main_prime \
     reward_model.mini_batch_size=${train_prompt_bsz} \
     reward_model.reward_manager=prime \
     trainer.val_before_train=False \
-    trainer.logger=['console'] \
+    trainer.logger=console \
     trainer.project_name='verl-test' \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=${NUM_GPUS} \

@@ -34,8 +34,6 @@ import typing
 import torch
 import torch.distributed as dist
 
-from . import kernels
-
 
 class LinearCrossEntropy(torch.autograd.Function):
     @staticmethod
@@ -47,7 +45,7 @@ class LinearCrossEntropy(torch.autograd.Function):
         temperature: typing.Optional[float] = 1.0,
         reduction: typing.Optional[str] = "none",
         dist_process_group: typing.Optional[dist.ProcessGroup] = None,
-    ) -> typing.List[torch.Tensor]:
+    ) -> list[torch.Tensor]:
         """_summary_
 
         Args:
@@ -66,6 +64,8 @@ class LinearCrossEntropy(torch.autograd.Function):
         assert isinstance(temperature, float), f"temperature must be a float, but got {type(temperature)}"
         assert isinstance(reduction, str), f"reduction must be a str, but got {type(reduction)}"
         with torch.cuda.nvtx.range("LinearCrossEntropy-forward"):
+            from . import kernels
+
             REDUCTION = kernels.get_entropy_reduction_enum_number(reduction.lower())
 
             original_hidden_shape = hidden.shape
@@ -87,7 +87,9 @@ class LinearCrossEntropy(torch.autograd.Function):
         return logprobs, entropy
 
     @staticmethod
-    def backward(ctx, dlogprobs: torch.Tensor, dentropy: torch.Tensor) -> typing.List[torch.Tensor]:
+    def backward(ctx, dlogprobs: torch.Tensor, dentropy: torch.Tensor) -> list[torch.Tensor]:
+        from . import kernels
+
         with torch.cuda.nvtx.range("LinearCrossEntropy-backward"):
             (hidden, weight, labels, _maximum, _accumulate, _entropy_b) = ctx.saved_tensors
             REDUCTION = ctx.REDUCTION

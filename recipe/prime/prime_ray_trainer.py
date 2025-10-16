@@ -30,7 +30,8 @@ from verl import DataProto
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import _compute_response_info
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer, ResourcePoolManager, Role, WorkerType
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer, ResourcePoolManager
+from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from verl.utils.metric import reduce_metrics
@@ -175,10 +176,6 @@ class RayPRIMETrainer(RayPPOTrainer):
         )
 
         self.use_critic = False
-
-    def _validate_config(self):
-        super()._validate_config()
-        # TODO: Additional config checks can be added here
 
     def _create_dataloader(self, *args, **kwargs):
         from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
@@ -376,6 +373,7 @@ class RayPRIMETrainer(RayPPOTrainer):
 
                 # pop those keys for generation
                 gen_batch = batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"])
+                gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
 
                 with simple_timer("step", timing_raw):
                     # generate a batch

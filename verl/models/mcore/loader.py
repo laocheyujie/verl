@@ -87,7 +87,7 @@ def load_state_dict_to_megatron_gptmodel(state_dict, wrapped_models, config, par
         assert pp_rank == 0, f"pp_rank:[{pp_rank}] != 0 on rank #0"
         assert dp_rank == 0, f"dp_rank:[{dp_rank}] != 0 on rank #0"
 
-    if not isinstance(wrapped_models, (list, tuple)):
+    if not isinstance(wrapped_models, list | tuple):
         wrapped_models = list(wrapped_models)
 
     assert len(wrapped_models) == virtual_pp_size
@@ -474,6 +474,9 @@ def load_state_dict_to_megatron_gptmodel(state_dict, wrapped_models, config, par
             elif "reward_head.weight" in state_dict and state_dict["reward_head.weight"].shape[0] == 1:
                 _broadcast_tensor(lm_head_weight, "reward_head.weight")
                 print_rank_0("load lm_head from value_head weight")
+            elif "score.weight" in state_dict and state_dict["score.weight"].shape[0] == 1:
+                _broadcast_tensor(lm_head_weight, "score.weight")
+                print_rank_0("load lm_head from score weight")
             else:
                 _broadcast_tensor(None, "lm_head.weight")
                 print_rank_0("fail to match lm_head in value_model")

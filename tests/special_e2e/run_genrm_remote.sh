@@ -5,7 +5,7 @@ export no_proxy="localhost,127.0.0.1"
 set -x
 
 # Launch a vllm server
-CUDA_VISIBLE_DEVICES=0 vllm serve verl-team/GenRM-CI-Test-1.5B \
+CUDA_VISIBLE_DEVICES=0 vllm serve $HOME/models/verl-team/GenRM-CI-Test-1.5B \
     --served_model_name genrm-demo --host localhost --port 30000 > /dev/null &
 SERVER_PID=$!
 
@@ -51,7 +51,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m verl.trainer.main_ppo \
     data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct \
+    actor_rollout_ref.model.path=$HOME/models/Qwen/Qwen2.5-0.5B-Instruct \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=128 \
@@ -69,7 +69,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m verl.trainer.main_ppo \
     custom_reward_function.path=recipe/genrm_remote/reward_function.py \
     custom_reward_function.name=compute_score_batch \
     trainer.critic_warmup=0 \
-    trainer.logger=['console'] \
+    trainer.logger=console \
     trainer.project_name='verl-test' \
     trainer.experiment_name='qwen2.5-0.5b-gen-rm' \
     trainer.n_gpus_per_node=4 \
