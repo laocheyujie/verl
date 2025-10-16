@@ -72,14 +72,14 @@ def run_ppo(config) -> None:
             num_cpus=config.ray_init.num_cpus,
         )
 
+    # NOTE: 创建远程 TaskRunner 实例
+    # NOTE: TaskRunner 是 Ray 中的一个远程 actor，它将在 Ray 集群上异步执行主要的训练任务
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
     if config.trainer.get("profile_steps") is not None and len(config.trainer.get("profile_steps", [])) > 0:
         nsight_options = OmegaConf.to_container(config.trainer.controller_nsight_options)
         runner = TaskRunner.options(runtime_env={"nsight": nsight_options}).remote()
     else:
-        # NOTE: 创建远程 TaskRunner 实例
-        # NOTE: TaskRunner 是 Ray 中的一个远程 actor，它将在 Ray 集群上异步执行主要的训练任务
         runner = TaskRunner.remote()
     # NOTE: 异步执行远程任务 runner.run()，并等待其完成
     # NOTE: 通过 ray.get() 阻塞直到远程任务执行完毕，确保整个初始化流程的顺序性

@@ -1,5 +1,38 @@
 # veRL 笔记
 
+## 入口
+### 数据预处理
+`examples/data_preprocess/demo.py`
+
+### 训练
+`verl.trainer.main_ppo.py:run_ppo`
+
+
+## run_ppo
+```py
+def run_ppo(config) -> None:
+    # 初始化 Ray 集群，配置 CPU 资源和运行时环境变量
+    ray.init(
+        runtime_env={"env_vars": {...}},
+        num_cpus=config.ray_init.num_cpus,
+    )
+
+    # 创建远程 TaskRunner 实例
+    # TaskRunner 是 Ray 中的一个远程 actor，它将在 Ray 集群上异步执行主要的训练任务
+    runner = TaskRunner.remote()
+    # 异步执行远程任务 runner.run()，并等待其完成
+    # 通过 ray.get() 阻塞直到远程任务执行完毕，确保整个初始化流程的顺序性
+    ray.get(runner.run.remote(config))
+```
+
+## TaskRunner
+1. 获取模型本地路径：如果是 HDFS 路径，则下载到本地；否则就直接返回模型路径
+2. 获取 Tokenizer：使用 AutoTokenizer，对于没有 pad_token 的 tokenizer，设置 pad_token 为 eos_token，pad_token_id 为 eos_token_id
+3. 获取 Processor：使用 AutoProcessor，没有的返回 None
+4. 
+
+
+
 ## 数据流
 A：Parquet 文件 --> B：RLHFDataset --> C：DataLoader + collate_fn --> D：DataProto 原始数据 --> E：pop 提取生成数据 --> F：Rollout 生成 --> G：union 合并数据 --> H：奖励计算 --> I：优势计算 --> J：重新计算 log_probs --> K：计算参考 log_probs --> L：计算价值函数 --> M1：更新 critic --> M2：更新 actor --> N：返回训练指标
 
