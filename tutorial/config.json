@@ -8,8 +8,8 @@
     "reward_fn_key": "data_source",
     "max_prompt_length": 32768,
     "max_response_length": 4096,
-    "train_batch_size": 32,
-    "val_batch_size": 32,
+    "train_batch_size": 256,
+    "val_batch_size": 256,
     "return_raw_input_ids": false,
     "return_raw_chat": false,
     "return_full_prompt": false,
@@ -22,14 +22,21 @@
     "image_key": "images",
     "video_key": "videos",
     "trust_remote_code": false,
-    "custom_cls": { "path": null, "name": null },
+    "custom_cls": {
+      "path": null,
+      "name": null
+    },
     "return_multi_modal_inputs": true,
-    "sampler": { "class_path": null, "class_name": null }
+    "sampler": {
+      "class_path": null,
+      "class_name": null
+    },
+    "enable_thinking": false
   },
   "actor_rollout_ref": {
     "hybrid_engine": true,
     "model": {
-      "path": "/data/cheyujie/code/all_in_one/models/huggingface/Qwen/Qwen3-0.6B",
+      "path": "/data/cheyujie/code/all_in_one/models/huggingface/Qwen/Qwen3-8B",
       "custom_chat_template": null,
       "use_shm": true,
       "external_lib": null,
@@ -43,13 +50,15 @@
       "exclude_modules": null,
       "use_liger": false,
       "use_fused_kernels": false,
-      "fused_kernel_options": { "impl_backend": "torch" },
+      "fused_kernel_options": {
+        "impl_backend": "torch"
+      },
       "trust_remote_code": false
     },
     "actor": {
       "strategy": "fsdp",
-      "ppo_mini_batch_size": 32,
-      "ppo_micro_batch_size": 8,
+      "ppo_mini_batch_size": 256,
+      "ppo_micro_batch_size": 32,
       "ppo_micro_batch_size_per_gpu": null,
       "use_dynamic_bsz": false,
       "ppo_max_token_len_per_gpu": 16384,
@@ -78,11 +87,15 @@
       "entropy_from_logits_with_chunking": false,
       "entropy_checkpointing": false,
       "checkpoint": {
-        "save_contents": ["model", "optimizer", "extra"],
+        "save_contents": [
+          "model",
+          "optimizer",
+          "extra"
+        ],
         "load_contents": "${actor_rollout_ref.actor.checkpoint.save_contents}"
       },
       "optim": {
-        "lr": 3e-5,
+        "lr": 3e-05,
         "lr_warmup_steps": -1,
         "lr_warmup_steps_ratio": 0.0,
         "min_lr_ratio": 0.0,
@@ -92,7 +105,9 @@
         "weight_decay": 0.01
       },
       "fsdp_config": {
-        "wrap_policy": { "min_num_params": 0 },
+        "wrap_policy": {
+          "min_num_params": 0
+        },
         "param_offload": true,
         "optimizer_offload": true,
         "offload_policy": false,
@@ -100,7 +115,11 @@
         "fsdp_size": -1,
         "forward_prefetch": false
       },
-      "profiler": { "discrete": false, "all_ranks": false, "ranks": [] }
+      "profiler": {
+        "discrete": false,
+        "all_ranks": false,
+        "ranks": []
+      }
     },
     "ref": {
       "strategy": "${actor_rollout_ref.actor.strategy}",
@@ -108,17 +127,23 @@
         "param_offload": true,
         "reshard_after_forward": true,
         "forward_prefetch": false,
-        "wrap_policy": { "min_num_params": 0 }
+        "wrap_policy": {
+          "min_num_params": 0
+        }
       },
       "use_torch_compile": "${actor_rollout_ref.actor.use_torch_compile}",
-      "log_prob_micro_batch_size": 8,
+      "log_prob_micro_batch_size": 32,
       "log_prob_micro_batch_size_per_gpu": null,
       "log_prob_use_dynamic_bsz": "${actor_rollout_ref.actor.use_dynamic_bsz}",
       "log_prob_max_token_len_per_gpu": "${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}",
       "ulysses_sequence_parallel_size": "${actor_rollout_ref.actor.ulysses_sequence_parallel_size}",
       "entropy_from_logits_with_chunking": false,
       "entropy_checkpointing": false,
-      "profiler": { "discrete": false, "all_ranks": false, "ranks": [] }
+      "profiler": {
+        "discrete": false,
+        "all_ranks": false,
+        "ranks": []
+      }
     },
     "rollout": {
       "name": "vllm",
@@ -135,11 +160,11 @@
       "free_cache_engine": true,
       "load_format": "safetensors",
       "layered_summon": true,
-      "tensor_model_parallel_size": 2,
+      "tensor_model_parallel_size": 4,
       "max_num_batched_tokens": 36864,
       "max_model_len": 36864,
       "max_num_seqs": 32768,
-      "log_prob_micro_batch_size": 8,
+      "log_prob_micro_batch_size": 32,
       "log_prob_micro_batch_size_per_gpu": null,
       "log_prob_use_dynamic_bsz": "${actor_rollout_ref.actor.use_dynamic_bsz}",
       "log_prob_max_token_len_per_gpu": "${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}",
@@ -149,8 +174,13 @@
       "n": 5,
       "multi_stage_wake_up": false,
       "engine_kwargs": {
-        "vllm": { "swap_space": null, "disable_mm_preprocessor_cache": false },
-        "sglang": { "attention_backend": null }
+        "vllm": {
+          "swap_space": null,
+          "disable_mm_preprocessor_cache": false
+        },
+        "sglang": {
+          "attention_backend": null
+        }
       },
       "val_kwargs": {
         "top_k": -1,
@@ -174,10 +204,17 @@
         "format": "hermes"
       },
       "calculate_log_probs": false,
-      "profiler": { "discrete": false, "all_ranks": false, "ranks": [] },
+      "profiler": {
+        "discrete": false,
+        "all_ranks": false,
+        "ranks": []
+      },
       "agent": {
         "num_workers": 8,
-        "custom_async_server": { "path": null, "name": null }
+        "custom_async_server": {
+          "path": null,
+          "name": null
+        }
       }
     }
   },
@@ -185,7 +222,7 @@
     "rollout_n": "${actor_rollout_ref.rollout.n}",
     "strategy": "${actor_rollout_ref.actor.strategy}",
     "optim": {
-      "lr": 1e-5,
+      "lr": 1e-05,
       "lr_warmup_steps_ratio": 0.0,
       "min_lr_ratio": null,
       "warmup_style": "constant",
@@ -207,7 +244,9 @@
         "optimizer_offload": false,
         "offload_policy": false,
         "reshard_after_forward": true,
-        "wrap_policy": { "min_num_params": 0 },
+        "wrap_policy": {
+          "min_num_params": 0
+        },
         "fsdp_size": -1,
         "forward_prefetch": false
       },
@@ -230,10 +269,18 @@
     "cliprange_value": 0.5,
     "loss_agg_mode": "${actor_rollout_ref.actor.loss_agg_mode}",
     "checkpoint": {
-      "save_contents": ["model", "optimizer", "extra"],
+      "save_contents": [
+        "model",
+        "optimizer",
+        "extra"
+      ],
       "load_contents": "${critic.checkpoint.save_contents}"
     },
-    "profiler": { "discrete": false, "all_ranks": false, "ranks": [] }
+    "profiler": {
+      "discrete": false,
+      "all_ranks": false,
+      "ranks": []
+    }
   },
   "reward_model": {
     "enable": false,
@@ -247,7 +294,9 @@
       "use_fused_kernels": "${actor_rollout_ref.model.use_fused_kernels}",
       "trust_remote_code": false,
       "fsdp_config": {
-        "wrap_policy": { "min_num_params": 0 },
+        "wrap_policy": {
+          "min_num_params": 0
+        },
         "param_offload": false,
         "reshard_after_forward": true,
         "fsdp_size": -1,
@@ -267,11 +316,18 @@
       "max_concurrent": 64,
       "memory_limit_mb": 1024
     },
-    "profiler": { "discrete": false, "all_ranks": false, "ranks": [] },
+    "profiler": {
+      "discrete": false,
+      "all_ranks": false,
+      "ranks": []
+    },
     "reward_api": "http://127.0.0.1:8018/reward",
     "reward_api_method": "POST"
   },
-  "custom_reward_function": { "path": null, "name": "compute_score" },
+  "custom_reward_function": {
+    "path": null,
+    "name": "compute_score"
+  },
   "algorithm": {
     "gamma": 1.0,
     "lam": 1.0,
@@ -286,7 +342,10 @@
       "target_kl": 0.1
     },
     "use_pf_ppo": false,
-    "pf_ppo": { "reweight_method": "pow", "weight_pow": 2.0 },
+    "pf_ppo": {
+      "reweight_method": "pow",
+      "weight_pow": 2.0
+    },
     "filter_groups": null
   },
   "trainer": {
@@ -305,16 +364,18 @@
       "cuda-graph-trace": "graph",
       "capture-range": "cudaProfilerApi",
       "capture-range-end": null,
-      "kill": "none"
+      "kill": "null"
     },
     "project_name": "verl_examples",
     "experiment_name": "gsm8k",
-    "logger": ["console"],
+    "logger": [
+      "console"
+    ],
     "log_val_generations": 0,
     "rollout_data_dir": null,
     "validation_data_dir": null,
     "nnodes": 1,
-    "n_gpus_per_node": 4,
+    "n_gpus_per_node": 8,
     "save_freq": 20,
     "esi_redundant_time": 0,
     "resume_mode": "auto",
@@ -331,5 +392,8 @@
     "ray_wait_register_center_timeout": 300,
     "device": "cuda"
   },
-  "ray_init": { "num_cpus": null, "timeline_json_file": null }
+  "ray_init": {
+    "num_cpus": null,
+    "timeline_json_file": null
+  }
 }

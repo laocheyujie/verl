@@ -20,23 +20,22 @@ def main(data_files, save_dir):
     
     def make_map_fn(split):
         def process_fn(example, idx):
-            question = example.pop("instruction")
-            example.pop("input")
-            example.pop("output")
+            query = example['query']
+            response = example['response']
             
             data = {
-                "data_source": "aminer",
+                "data_source": "chinese_general_mcq",
                 "prompt": [
                     {
                         "role": "user",
-                        "content": question,
+                        "content": query,
                     }
                 ],
                 "ability": "instruction",
-                "reward_model": {"style": "rule", "ground_truth": None},
+                "reward_model": {"style": "rule", "ground_truth": response},
                 "extra_info": {
                     "split": split,
-                    "index": idx
+                    "index": idx,
                 },
             }
             return data

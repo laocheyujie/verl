@@ -82,7 +82,8 @@ class RLHFDataset(Dataset):
         processor (ProcessorMixin, optional): Multimodal preprocessor for images/videos.
     """
 
-    # NOTE: RLHFDataset 是 verl 中用于 RLHF 数据加载的数据集类，继承自 datasets.Dataset，主要用于处理 Parquet 文件中的数据，包括数据下载、tokenize、过滤、预处理等
+    # NOTE: RLHFDataset 是 verl 中用于 RLHF 数据加载的数据集类，
+    # 继承自 datasets.Dataset，主要用于处理 Parquet 文件中的数据，包括数据下载、tokenize、过滤、预处理等
 
     def __init__(
         self,

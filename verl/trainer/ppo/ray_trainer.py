@@ -84,7 +84,6 @@ class ResourcePoolManager:
             # For FSDP backend, we recommend using max_colocate_count=1 that merge all WorkerGroups into one.
             # For Megatron backend, we recommend using max_colocate_count>1
             # that can utilize different WorkerGroup for differnt models
-            # NOTE: 通过 ResourcePoolManager 创建 Ray 资源池
             resource_pool = RayResourcePool(
                 process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=1, name_prefix=resource_pool_name
             )
@@ -503,7 +502,6 @@ class RayPPOTrainer:
         reward_model_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
 
         # pop those keys for generation
-        # NOTE: 6. 从 batch 中分离出用于 rollout 的数据 (input_ids, attention_mask, position_ids)，保留其他数据用于后续处理
         batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
         non_tensor_batch_keys_to_pop = set(batch.non_tensor_batch.keys()) - reward_model_keys
         gen_batch = batch.pop(
@@ -668,18 +666,18 @@ class RayPPOTrainer:
         1. Ray resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
 
-        NOTE: init_workers() 函数负责在 Ray 集群上实例化和初始化 ActorRollout、Critic、Reference Policy 和 Reward Model Workers
+        NOTE: init_workers() 负责在Ray集群上实例化和初始化 ActorRollout, Critic, Reference Policy, Reward Model Workers
         """
         # NOTE: 1. 创建资源池：通过 ResourcePoolManager 创建 Ray 资源池
-        # NOTE: 为每个角色（例如 actor_rollout、critic、ref）指定用哪个类初始化 worker，并且说明在哪个资源池里分配它们
         self.resource_pool_manager.create_resource_pool()
 
-        # NOTE: 2. 初始化资源池到类的映射：为每个资源池创建一个字典，用于存储不同角色 Worker 的 RayClassWithInitArgs 包装器
+        # NOTE: 2. 初始化资源池到类的映射：为每个资源池创建一个字典，存储不同角色 Worker 的 RayClassWithInitArgs 包装器
         # NOTE: RayClassWithInitArgs 用于延迟初始化 Worker，存储了 Worker 的类和初始化参数
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
         # NOTE: 3. 创建不同角色的 Worker 的 RayClassWithInitArgs 实例
-        # NOTE: 根据配置启用情况，为 ActorRollout、Critic、Reference Policy 和 Reward Model 创建对应的 RayClassWithInitArgs 实例
+        # NOTE: 根据配置启用情况，为 ActorRollout, Critic, Reference Policy, Reward Model
+        # 创建对应的 RayClassWithInitArgs 实例
         # create actor and rollout
         if self.hybrid_engine:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
@@ -717,8 +715,9 @@ class RayPPOTrainer:
             self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
 
         # NOTE: 4. 初始化 WorkerGroup：
-        # NOTE: 遍历所有资源池，将同一资源池中的多个 Worker 类通过 create_colocated_worker_cls 组合成一个共置类，然后实例化 RayWorkerGroup
-        # NOTE: RayWorkerGroup 负责在多个 GPU 上启动多个 Worker 实例。最后调用 spawn() 方法在 Ray 中实际创建 Worker 实例
+        # NOTE: 遍历所有资源池，将同一资源池中的多个 Worker 类通过 create_colocated_worker_cls 组合成一个共置类
+        # NOTE: 然后实例化 RayWorkerGroup，RayWorkerGroup 负责在多个 GPU 上启动多个 Worker 实例
+        # 最后调用 spawn() 方法在 Ray 中实际创建 Worker 实例
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -743,7 +742,7 @@ class RayPPOTrainer:
 
         # NOTE: 根据资源池和角色，批量创建多个 worker 实例（Ray Actor）并统一管理它们，赋予对应的职责
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
-            # NOTE: worker_dict_cls 就是 ActorRolloutRefWorker 类
+            # NOTE: worker_dict_cls 是融合了多个子 Actor 类的共置 Worker 类
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             # NOTE: ray_worker_group_cls 就是 RayWorkerGroup 实例，指定资源池并规定角色和对应的类
             wg_dict = self.ray_worker_group_cls(
@@ -755,10 +754,10 @@ class RayPPOTrainer:
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
 
-        # NOTE: 5. 初始化各个 Worker：
-        # NOTE: 根据角色从创建的 WorkerGroup 字典中获取对应的 WorkerGroup，并调用其 init_model() 方法，按照依赖关系依次初始化不同的 Worker 模块
+        # NOTE: 5. 调用 init_model() 完成模型加载
+        # NOTE: 根据角色从 all_wg 字典中获取对应的 WorkerGroup，
+        # 并调用其 init_model() 方法，按照依赖关系依次初始化不同的 Worker 模块
         # NOTE: ActorRollout Worker 通常最后初始化以优化内存使用
-        # NOTE: 调用 init_model() 完成模型加载
         if self.use_critic:
             self.critic_wg = all_wg["critic"]
             self.critic_wg.init_model()
@@ -852,6 +851,7 @@ class RayPPOTrainer:
         if self.config.trainer.default_hdfs_dir is not None:
             raise NotImplementedError("load from hdfs is not implemented yet")
         else:
+            # NOTE: default_local_dir 是训练保存位置
             checkpoint_folder = self.config.trainer.default_local_dir  # TODO: check path
             if not os.path.isabs(checkpoint_folder):
                 working_dir = os.getcwd()
@@ -1019,14 +1019,17 @@ class RayPPOTrainer:
                     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                 )
 
+                # NOTE: 6. 从 batch 中分离出用于 rollout 的数据 (input_ids, attention_mask, position_ids)，
+                # 保留其他数据用于后续处理
                 gen_batch = self._get_gen_batch(batch)
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
+                # NOTE: 7. 重复 n 次
                 gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
 
                 is_last_step = self.global_steps >= self.total_training_steps
-                # NOTE: 7. 调用 ActorRolloutWorker 生成序列，并记录生成时间
+                # NOTE: 8. 调用 ActorRolloutWorker 生成序列，并记录生成时间
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):

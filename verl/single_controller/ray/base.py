@@ -759,6 +759,7 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
     """
     cls_dict = {}
     init_args_dict = {}
+    # NOTE: 检查所有待合并类的继承关系，并从中智能地选择一个最合适的父类
     worker_cls = _determine_fsdp_megatron_base_class(
         [cls.cls.__ray_actor_class__.__mro__ for cls in class_dict.values()]
     )
@@ -772,16 +773,21 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
     assert cls_dict.keys() == init_args_dict.keys()
 
     # TODO: create a class with customizable name
+    # NOTE: 动态地创建了一个名为 WorkerDict 的新类，它继承自上面确定的 worker_cls
     class WorkerDict(worker_cls):
         def __init__(self):
             super().__init__()
             self.worker_dict = {}
+            # NOTE: 遍历所有传入的子 Actor 类
             for key, user_defined_cls in cls_dict.items():
                 user_defined_cls = _unwrap_ray_remote(user_defined_cls)
                 # directly instantiate the class without remote
                 # in worker class, e.g. <verl.single_controller.base.worker.Worker>
                 # when DISABLE_WORKER_INIT == 1 it will return immediately
+                # NOTE: 在实例化子 Actor 时，会临时设置一个环境变量
+                # NOTE: 这样做是为了暂时禁用 Worker 基类的初始化逻辑，避免在打包过程中发生不必要的或重复的初始化
                 with temp_env_var("DISABLE_WORKER_INIT", "1"):
+                    # NOTE: 直接实例化每一个子 Actor，并将这些实例存储在 self.worker_dict 字典中
                     self.worker_dict[key] = user_defined_cls(
                         *init_args_dict[key].get("args", ()), **init_args_dict[key].get("kwargs", {})
                     )
@@ -789,6 +795,9 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
     # now monkey-patch the methods from inner class to WorkerDict
     for key, user_defined_cls in cls_dict.items():
         user_defined_cls = _unwrap_ray_remote(user_defined_cls)
+        # NOTE: 通过“猴子补丁”技术，将所有子 Actor 的公开方法动态地绑定到 WorkerDict 类上
+        # NOTE: 创建一些代理方法，当调用 WorkerDict 实例的某个方法时，
+        # 会自动查找到对应的内部子 Actor 实例，并将调用请求转发给它
         _bind_workers_method_to_parent(WorkerDict, key, user_defined_cls)
 
     remote_cls = ray.remote(WorkerDict)

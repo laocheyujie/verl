@@ -48,8 +48,12 @@ else:
 
 
 def init_fn(x: torch.nn.Module):
+    # NOTE: 在非主节点上，快速在 GPU 上分配“空壳”显存，而不进行实际的数值初始化或数据拷贝，从而节省时间和内存
     if torch.distributed.get_rank() != 0:
+        # NOTE: 将张量 Tensor 移动到当前 GPU，但不会复制数据，也不会初始化数据（内存中是随机的垃圾值）
+        # 只要先在 GPU 上把“坑”占好就行，里面的值是多少完全不重要
         x = x.to_empty(device=get_device_id(), recurse=False)
+        # NOTE: 显式调用 PyTorch 的缓存清理机制，释放刚才可能产生的临时内存碎片
         get_torch_device().empty_cache()
     return x
 
@@ -62,6 +66,7 @@ def get_init_weight_context_manager(use_meta_tensor=True, mesh: DeviceMesh = Non
         if mesh is None:
             init_context = init_empty_weights if torch.distributed.get_rank() != 0 else cpu_init_weights
         else:
+            # NOTE: mesh.get_coordinate()[-1] != 0: 非分片中的第一片
             init_context = init_empty_weights if mesh.get_coordinate()[-1] != 0 else cpu_init_weights
     else:
         init_context = cpu_init_weights
@@ -103,6 +108,8 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
 
     from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy
 
+    # NOTE: 1. 这个策略用来识别模型中的 LoRA 层
+    # NOTE: 它的判断依据是：一个模块没有子模块，并且拥有一个需要计算梯度的 weight 属性
     # Add lambda policy for LoRA modules if is_lora is True
     if is_lora:
 
@@ -116,9 +123,12 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
         policies.append(lambda_policy)
 
+    # NOTE: 2. 将任何参数量超过这个阈值的模块都进行包装
     if min_num_params > 0:
         size_policy = functools.partial(size_based_auto_wrap_policy, min_num_params=min_num_params)
         policies.append(size_policy)
+    # NOTE: 3. 基于 Transformer 层的策略
+    # NOTE: 根据字符串名称在模型中找到对应的类，然后生成一个只包装这些特定类的策略
     elif fsdp_transformer_layer_cls_to_wrap is not None:
         transformer_cls_to_wrap = set()
         for layer_class in fsdp_transformer_layer_cls_to_wrap:
@@ -134,6 +144,7 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         )
         policies.append(transformer_policy)
 
+    # NOTE: 使用 _or_policy 将这些策略组合起来，只要一个模块满足任意一个策略，它就会被 FSDP 单独包装
     if len(policies) > 0:
         auto_wrap_policy = functools.partial(_or_policy, policies=policies)
 
@@ -467,12 +478,16 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
 
     # To broadcast, it needs to be instantiated in the GPU.
     if dist.get_rank() == 0:
+        # NOTE: 这里的 model 已经是“分片后”的状态，在此之前 apply_fsdp2（即 fully_shard）已经被调用了
         model = model.to(device=get_device_id(), non_blocking=True)
     else:
+        # NOTE: 在 GPU 上分配好“坑位”（显存空间），准备接收数据
         model = model.to_empty(device=get_device_id())
 
     cpu_offload = cpu_offload is not None
     options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=True)
+    # NOTE: 从 CPU 内存的 full_state（全量）中读取数据，切出属于 Rank 0 的那一片，填入 Rank 0 的 GPU 显存
+    # 同时切出其他人的分片，通过网络广播给其他 Rank
     set_model_state_dict(model, full_state, options=options)
 
     # rotary_emb is not in state_dict, so we need to broadcast it manually
@@ -529,6 +544,7 @@ def apply_fsdp2(model, fsdp_kwargs, config):
         # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
         #     print(f"wrap module {module.__class__.__name__}")
         with maybe_patch_fsdp_module(module):
+            # NOTE: 将普通的 nn.Module 转换为支持参数分片（Sharding）的分布式模块
             fully_shard(module, **fsdp_kwargs)
 
     # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:

@@ -180,6 +180,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         else:
             self._register_dispatch_collect_info("actor", dp_rank=self.rank, is_collect=True)
 
+        # NOTE: # 初始化 Ulysses 分片管理器
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
         # NOTE: 5. 获取 LoRA rank 和是否使用 LoRA 的标志
         self._lora_rank = self.config.model.get("lora_rank", 0)
@@ -194,6 +195,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
         self.use_orig_params = self.config.actor.fsdp_config.get("use_orig_params", False)
 
+        # NOTE: 7. 根据 Worker 角色配置 profiler，用于性能分析配置
         # TODO(haibin.lin):
         # As of now the type of config is DictConfig, if we assign config.profiler with ProfilerConfig,
         # it will actually convert the ProfilerConfig dataclass back to a DictConfig.
@@ -222,6 +224,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
         else:
             tool_config = None
+        # NOTE: 初始化分布式性能分析器
         DistProfilerExtension.__init__(
             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
         )
@@ -236,9 +239,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # TODO: it seems that manual offload is slowly than FSDP offload
             self._is_offload_param = self.config.ref.fsdp_config.get("param_offload", False)
 
-        # normalize config
+        # NOTE: 规范化 actor 相关配置
         # NOTE: 9. 为 Actor，Rollout 和 Reference 分配 normalize batch size
-        # NOTE: data.train_batch_size: 在一次完整的 PPO 迭代（从 rollout 到 train）中，从数据集中采样并用于生成 experience 的总样本数量，决定了每次 policy 更新所依据的数据量
+        # NOTE: data.train_batch_size: 在一次完整的 PPO 迭代（从 rollout 到 train）中，
+        # 从数据集中采样并用于生成 experience 的总样本数量，决定了每次 policy 更新所依据的数据量
+        # normalize config
         if self._is_actor:
             # NOTE: ppo_mini_batch_size: 模型会在数据累积到一个 mini batch 后更新一次参数
             # NOTE: ppo_mini_batch_size = ppo_mini_batch_size * rollout.n
@@ -266,12 +271,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     f"ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
                 )
 
+        # NOTE: 规范化 rollout 相关配置
         # normalize rollout config
         if self._is_rollout and self.config.rollout.log_prob_micro_batch_size is not None:
             self.config.rollout.log_prob_micro_batch_size //= (
                 self.device_mesh.size() // self.ulysses_sequence_parallel_size
             )
             self.config.rollout.log_prob_micro_batch_size_per_gpu = self.config.rollout.log_prob_micro_batch_size
+        # NOTE: 规范化 ref 相关配置
         # normalize ref config
         if self._is_ref and self.config.ref.log_prob_micro_batch_size is not None:
             self.config.ref.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
@@ -320,11 +327,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             else:
                 self.tokenizer.chat_template = self.config.model.custom_chat_template
 
+        # NOTE: Actor 使用 fp32; Reference 使用 bf16
+        # NOTE: 因为 pytorch 的各种 optimizer 都是直接和 parameter 绑定的
+        # 用 bf16 的 parameter 初始化的 optimizer 也是 bf16
+        # NOTE: 所以 actor model 先 load 了 fp32，然后初始化 optimizer 作为混合精度，最后再把 model 转成 bf16
         torch_dtype = fsdp_config.get("model_dtype", None)
         if torch_dtype is None:
-            # NOTE: Actor 使用 fp32; Reference 使用 bf16
-            # NOTE: 因为 pytorch 的各种 optimizer 都是直接和 parameter 绑定的，用 bf16 的 parameter 初始化的 optimizer 也是 bf16
-            # NOTE: 所以 model 先 load 了 fp32，然后初始化 optimizer 作为混合精度，最后把 model 转成 bf16
             torch_dtype = torch.float32 if self._is_actor else torch.bfloat16
         else:
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
@@ -357,6 +365,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self.rank == 0:
             print(f"Model config after override: {actor_model_config}")
 
+        # NOTE: init_context 在创建一个巨大的模型时，先不为模型的参数分配任何实际的内存，而是创建一个“空壳”模型
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh
@@ -391,7 +400,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 else:
                     actor_module_class = AutoModel
 
-            # NOTE: 加载模型
+            # NOTE: 加载模型，受 init_context 影响，不会实际分配内存，只会加载一个空壳
             actor_module = actor_module_class.from_pretrained(
                 pretrained_model_name_or_path=local_path,
                 torch_dtype=torch_dtype,
@@ -399,8 +408,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 trust_remote_code=trust_remote_code,
             )
 
-            # Apply Liger kernel to the model if use_liger is set to True
             # NOTE: 应用 Liger kernel 优化技术
+            # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
 
@@ -491,16 +500,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
 
         # TODO: add transformer policy
-        # We force reference policy to use CPUOffload to save memory.
-        # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
         # NOTE: 我们强制 reference policy 使用 CPUOffload 来节省内存
         # NOTE: 我们强制关闭 actor 的 CPUOffload，因为它在使用 grad accumulation 时会导致不正确的结果
+        # We force reference policy to use CPUOffload to save memory.
+        # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
         cpu_offload = None if role == "actor" else CPUOffload(offload_params=True)
         fsdp_strategy = self.config.actor.strategy
         # NOTE: 根据配置的策略，将模型封装到 FSDP 中
         if fsdp_strategy == "fsdp":
+            # NOTE: 这里开始真正的加载权重
             actor_module_fsdp = FSDP(
-                actor_module,
+                module=actor_module,
                 cpu_offload=cpu_offload,
                 param_init_fn=init_fn,
                 auto_wrap_policy=auto_wrap_policy,
@@ -531,8 +541,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 "reshard_after_forward": fsdp_config.reshard_after_forward,
                 "shard_placement_fn": get_shard_placement_fn(fsdp_size=self.device_mesh.shape[-1]),
             }
+            # NOTE: 在 CPU 内存中创建了整个模型的一个完整副本
             full_state = actor_module.state_dict()
+            # NOTE: 这里开始真正的加载权重
+            # NOTE: 应用 FSDP2 分布式策略，对模型结构进行“原地”改造
             apply_fsdp2(actor_module, fsdp_kwargs, fsdp_config)
+            # NOTE: 加载并广播权重，从主节点分发权重数据到各个分片
             fsdp2_load_full_state_dict(actor_module, full_state, fsdp_mesh, cpu_offload)
             actor_module_fsdp = actor_module
         else:
@@ -601,7 +615,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 2. build rollout device mesh
         # NOTE: 为 Rollout 创建推理张量并行（infer_tp）设备网格
+        # NOTE: infer_tp (Tensor Parallel): 推理时的张量并行维度，一个模型被切分到 infer_tp 个 GPU 上同时运行
         infer_tp = self.config.rollout.tensor_model_parallel_size * self.config.rollout.data_parallel_size
+        # NOTE: dp (Data Parallel): 数据并行维度，不同的 DP 组处理不同的数据（Prompt）
         dp = self.world_size // infer_tp
         assert self.world_size % infer_tp == 0, (
             f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
@@ -612,14 +628,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         rollout_name = self.config.rollout.name
 
         if rollout_name == "hf":
+            # NOTE: 如果是 hf (HuggingFace 原生推理)，通常不需要复杂的切分逻辑
             self._register_dispatch_collect_info("rollout", dp_rank=self.rank, is_collect=True)
         else:
+            # NOTE: 如果是其他（如 vLLM），则设置 is_collect
+            # 在 Tensor Parallel 中，只有 rank 0 负责收集最终生成的 token 结果，其他 rank 只是协助计算
+            # 这个标志位用于后续告诉系统哪些进程需要回传生成的数据
             is_collect = rollout_device_mesh["infer_tp"].get_local_rank() == 0
             self._register_dispatch_collect_info(
                 "rollout", dp_rank=rollout_device_mesh["dp"].get_local_rank(), is_collect=is_collect
             )
 
         # 3. init trainer and rollout random states
+        # NOTE: 确保生成的随机性独立且可控，同时不影响训练的随机状态
         self.torch_random_states = get_torch_device().get_rng_state()
         gen_dp_rank = rollout_device_mesh["dp"].get_local_rank()
         get_torch_device().manual_seed(gen_dp_rank + 1000)  # make sure all tp ranks have the same random states
@@ -628,19 +649,26 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 4. build rollout model
         log_gpu_memory_usage(f"Before building {self.config.rollout.name} rollout", logger=logger)
+        # NOTE: 根据配置实例化具体的 Rollout 引擎
         self.rollout = get_rollout_class(rollout_config.name, rollout_config.mode)(
             config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh
         )
         log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=logger)
 
         # Full params
+        # NOTE: 当从 FSDP 模型中加载或保存权重用于推理时，需要指定权重的聚合方式
+        # set_state_dict_type 本身不执行加载动作，它只是立了一个“规矩”
+        # 告诉 PyTorch，如果在接下来的代码中，有人试图对 self.actor_module_fsdp 调用 .state_dict()（读权重）
+        # 或 .load_state_dict()（写权重）时，应该使用什么格式
         if torch.distributed.get_world_size() == 1 and fsdp_version(self.actor_module_fsdp) == 1:
+            # NOTE: 单卡：使用完整权重 (FULL_STATE_DICT)
             FSDP.set_state_dict_type(
                 self.actor_module_fsdp,
                 state_dict_type=StateDictType.FULL_STATE_DICT,
                 state_dict_config=FullStateDictConfig(),
             )
         elif fsdp_version(self.actor_module_fsdp) == 1:
+            # NOTE: 多卡：通常使用分片权重 (SHARDED_STATE_DICT) 以节省内存，避免在单张卡上聚合整个模型导致 OOM
             FSDP.set_state_dict_type(
                 self.actor_module_fsdp,
                 state_dict_type=StateDictType.SHARDED_STATE_DICT,
@@ -665,6 +693,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
         if self._is_offload_param:
+            # NOTE: 如果配置了 offload_param 必须先把 FSDP 模型的参数加载回 GPU
+            # 因为 FSDP 需要在 GPU 上进行全参数收集（AllGather），才能提取出完整的权重字典
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
@@ -672,16 +702,20 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         peft_model = getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
         if hasattr(peft_model, "peft_config"):  # LoRA
             peft_config = peft_model.peft_config.get("default", None)
+            # NOTE: 只提取 LoRA 的增量权重
             params = collect_lora_params(
                 module=self.actor_module_fsdp,
                 layered_summon=self.config.rollout.get("layered_summon", False),
                 base_sync_done=self.base_sync_done,
             )
             if not self.base_sync_done:
+                # NOTE: 调整键名（Key Name），使其匹配推理引擎的格式
                 params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
         else:
+            # NOTE: 直接提取整个模型的参数
             params = self.actor_module_fsdp.state_dict()
 
+        # NOTE: 键名转换，确保提取出来的权重名称能被推理引擎识别
         params = convert_weight_keys(
             params, getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
         )
@@ -691,6 +725,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # separately collect and update LoRA weights and base model weights through their respective interfaces.
         # Here: params contains LoRA weights, base_model_params contains base model weights.
         if peft_config is not None and getattr(self.rollout, "sleep_level", None) == 2:
+            # NOTE: 如果使用了深度休眠（Sleep Level 2），推理引擎会在空闲时彻底释放基础模型（Base Model）权重
+            # 因此不仅要提取 LoRA 权重，还需要重新提取基础模型权重
             base_model_params = collect_lora_params(
                 module=self.actor_module_fsdp,
                 layered_summon=self.layered_summon,
@@ -703,32 +739,49 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
         if self._is_offload_param:
+            # NOTE: 把 FSDP 模型踢回 CPU
+            # 既然权重已经提取到了内存变量 params 中，FSDP 模型在 GPU 上的副本暂时没用了
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
         log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
         set_expandable_segments(False)
 
         if peft_config is not None and self.base_sync_done:
+            # NOTE: LoRA 权重通常很小，而且不是分布式的 DTensor，只是普通的 Tensor，所以不需要额外的转换，直接传过去即可
             per_tensor_param = params
         else:
+            # NOTE: 全量微调，或者 LoRA 的第一次同步（此时 base_sync_done 为 False，需要传 Base Model）
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+            # NOTE: FSDP2 使用 DTensor 来表示跨卡分片的张量，推理引擎通常不识别 DTensor 对象，需要标准的 PyTorch Tensor
+            # .full_tensor(): 将分布在多张卡上的分片（Shards）重新聚合成一个完整的张量，相当于执行了一次 AllGather 通信
             per_tensor_param = (
                 (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
                 for name, param in params.items()
             )
 
         if self.config.rollout.free_cache_engine:
+            # NOTE: 在切回 Training 模式时，曾经把 Rollout 引擎“休眠”了（释放了显存）
+            # 告诉 Rollout 引擎做好接收权重的准备
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
 
         if peft_config is not None and getattr(self.rollout, "sleep_level", None) == 2:
+            # NOTE: 因为基础模型刚才被删了，现在切回 Rollout 模式，必须把基础模型权重重新发给推理引擎
             per_tensor_base_params = (
                 (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
                 for name, param in base_model_params.items()
             )
             await self.rollout.update_weights(per_tensor_base_params, base_sync_done=False)
+            # NOTE: 立即删除 Python 变量，释放内存引用，防止内存泄漏
+            # NOTE: 训练用 self.actor_module_fsdp 里的权重
+            # NOTE: 推理用 self.rollout.update_weights 后的权重
+            # NOTE: base_model_params 里的权重副本没用了
+            # NOTE: 下一轮训练结束后，参数会变，我们需要重新从 FSDP 模型里提取新的权重，旧的副本不仅没用，而且是过期的
             del base_model_params, per_tensor_base_params
 
+        # NOTE: base_sync_done:
+        # 如果为 True: 告诉推理引擎，“基础架构没变，只更新我给你的这部分增量参数（LoRA）”
+        # 如果为 False: 告诉推理引擎，“这是一次全量刷新/初始化”
         await self.rollout.update_weights(per_tensor_param, peft_config=peft_config, base_sync_done=self.base_sync_done)
         log_gpu_memory_usage("After update_weights", logger=logger)
         del params, per_tensor_param
@@ -746,14 +799,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         """Context switch hybridengine to trainer mode."""
         if self.config.rollout.free_cache_engine:
             log_gpu_memory_usage("Before rollout offload", logger=logger)
+            # NOTE: 释放推理显存
             await self.rollout.release()
             log_gpu_memory_usage("After rollout offload", logger=logger)
 
         self.actor_module_fsdp.train()
 
         # add empty cache after each compute
+        # NOTE: 强制调用 torch.cuda.empty_cache()，释放未使用的缓存显存
         aggressive_empty_cache(force_sync=True)
 
+        # NOTE: 启用可扩展段（Expandable Segments），允许在运行时动态扩展模型参数的内存分配
         set_expandable_segments(True)
 
         # restore random states

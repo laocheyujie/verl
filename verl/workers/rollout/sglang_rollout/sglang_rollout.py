@@ -129,6 +129,7 @@ class AsyncEngine(sglang.srt.entrypoints.engine.Engine):
 
     async def release_memory_occupation(self, tags: Optional[list[str]] = None):
         """Release GPU occupation temporarily."""
+        # NOTE: 在训练时释放掉显存占用
         if tags is None:
             obj = ReleaseMemoryOccupationReqInput()
         else:
@@ -137,6 +138,7 @@ class AsyncEngine(sglang.srt.entrypoints.engine.Engine):
 
     async def resume_memory_occupation(self, tags: Optional[list[str]] = None):
         """Resume GPU occupation."""
+        # NOTE: 在训练后恢复显存占用
         if tags is None:
             obj = ResumeMemoryOccupationReqInput()
         else:
@@ -144,6 +146,7 @@ class AsyncEngine(sglang.srt.entrypoints.engine.Engine):
         return await self.tokenizer_manager.resume_memory_occupation(obj, None)
 
     async def update_weights_from_tensor(self, update_weights_request: UpdateWeightsFromTensorReqInput):
+        # NOTE: 训练结束后更新模型权重
         return await self.tokenizer_manager.update_weights_from_tensor(update_weights_request, None)
 
     async def flush_cache(self):

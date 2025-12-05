@@ -1,12 +1,12 @@
 import copy
 
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from verl.utils.config import omega_conf_to_dataclass
 
 
-def trainer_dict_to_dataclass(conf: DictConfig):
+def trainer_dict_to_dataclass(conf: DictConfig | dict):
     """Convert specific nested sections of a DictConfig object into dataclass instances.
 
     Args:
@@ -16,6 +16,7 @@ def trainer_dict_to_dataclass(conf: DictConfig):
     Returns:
         DictConfig: A deep copy of the input `conf` with specific sections converted to dataclasses.
     """
+    conf = OmegaConf.create(conf)  # in case it's a dict
     # Create a deep copy of the input configuration to avoid modifying the original object
     config = copy.deepcopy(conf)
     config.algorithm = omega_conf_to_dataclass(config.algorithm)
@@ -30,9 +31,10 @@ def trainer_dict_to_dataclass(conf: DictConfig):
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config_dict):
     config = trainer_dict_to_dataclass(config_dict)
+    print(type(config))  # <class 'omegaconf.dictconfig.DictConfig'>
+    print(config)  # 见 config.json
     return config
 
 
 if __name__ == "__main__":
-    conf = main()
-    print(conf)
+    main()

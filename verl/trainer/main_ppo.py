@@ -119,8 +119,9 @@ class TaskRunner:
         """Add actor rollout worker based on the actor strategy."""
         from verl.single_controller.ray import RayWorkerGroup
 
-        # NOTE: 3. Worker 类型选择
-        # NOTE: 根据配置中指定的 Actor 策略（如 fsdp 或 megatron），动态选择相应的 Worker 类（例如 ActorRolloutRefWorker 和 CriticWorker），并确定使用的 RayWorkerGroup 类型
+        # NOTE: 2.1 选择 Worker 类
+        # NOTE: 根据配置中指定的 Actor 策略（如 fsdp 或 megatron），动态选择相应的 Worker 类
+        # （例如 ActorRolloutRefWorker 和 CriticWorker），并确定使用的 RayWorkerGroup 类型
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
             from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
 
@@ -146,15 +147,16 @@ class TaskRunner:
 
         from verl.trainer.ppo.ray_trainer import Role
 
-        # NOTE: 4. 定义角色到 Worker 类的映射
-        # NOTE: 创建一个远程的 Ray Actor，将其包装成一个 Ray Actor 类
-        # NOTE: 定义 Ray 资源池的规格和角色到资源池的映射，用于 GPU 资源的分配和管理
+        # NOTE: 2.2. 创建远程 Ray Actor；2.3. 定义 `ActorRollout` 角色到 Actor 的映射
+        # NOTE: ray.remote 创建一个远程的 Ray Actor，将其包装成一个 Ray Actor 类
+        # NOTE: 定义 Ray 角色到资源池的映射，用于 GPU 资源的分配和管理
         self.role_worker_mapping[Role.ActorRollout] = ray.remote(actor_rollout_cls)
 
         return actor_rollout_cls, ray_worker_group_cls
 
     def add_critic_worker(self, config):
         """Add critic worker to role mapping."""
+        # NOTE: 3.1 选择 Worker 类
         if config.critic.strategy in {"fsdp", "fsdp2"}:
             use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
             if use_legacy_worker_impl in ["auto", "enable"]:
@@ -174,13 +176,14 @@ class TaskRunner:
 
         from verl.trainer.ppo.ray_trainer import Role
 
+        # NOTE: 3.2. 创建远程 Ray Actor；3.3. 定义 `Critic` 角色到 Actor 的映射
         self.role_worker_mapping[Role.Critic] = ray.remote(CriticWorker)
 
     def init_resource_pool_mgr(self, config):
         """Initialize resource pool manager."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        # NOTE: 5. 定义资源池的规格和角色到资源池的映射
+        # NOTE: 定义资源池到资源的映射
         global_pool_id = "global_pool"
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
@@ -195,6 +198,7 @@ class TaskRunner:
             reward_pool = [config.reward_model.n_gpus_per_node] * config.reward_model.nnodes
             resource_pool_spec["reward_pool"] = reward_pool
 
+        # NOTE: 定义 Ray 角色到资源池映射
         self.mapping[Role.ActorRollout] = global_pool_id
         self.mapping[Role.Critic] = global_pool_id
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
@@ -206,9 +210,9 @@ class TaskRunner:
         """Add reward model worker if enabled."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        # NOTE: 6. Reward Model Worker 的初始化
         # NOTE: 加载用于训练和验证的奖励模型
         if config.reward_model.enable:
+            # NOTE: 4.1. 选择 Worker 类
             use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
             if use_legacy_worker_impl in ["auto", "enable"]:
                 if config.reward_model.strategy in {"fsdp", "fsdp2"}:
@@ -224,7 +228,9 @@ class TaskRunner:
             else:
                 raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
 
+            # NOTE: 4.2. 创建远程 Ray Actor；4.3. 定义 `RewardModel` 角色到 Actor 的映射
             self.role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
+            # NOTE: 4.4. 定义 `RewardModel` 角色到资源池的映射
             if config.reward_model.enable_resource_pool:
                 self.mapping[Role.RewardModel] = "reward_pool"
             else:
@@ -234,10 +240,10 @@ class TaskRunner:
         """Add reference policy worker if KL loss or KL reward is used."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        # NOTE: 7. Reference Policy Worker 的初始化
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
-            # NOTE: 使用参考模型计算 KL 散度
+            # NOTE: 5.2. 创建远程 Ray Actor；5.3. 定义 `RefPolicy` 角色到 Actor 的映射
             self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
+            # NOTE: 5.4. 定义 `RefPolicy` 角色到资源池的映射
             self.mapping[Role.RefPolicy] = "global_pool"
 
     def run(self, config):
@@ -258,13 +264,16 @@ class TaskRunner:
         from verl.utils.fs import copy_to_local
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
-        # NOTE: 加载、解析和验证训练任务的配置（使用 OmegaConf），确保所有参数的正确性和一致性
+        # NOTE: 1. 加载、解析和验证训练任务的配置（使用 OmegaConf），确保所有参数的正确性和一致性
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
 
+        # NOTE: 2.1 添加 Actor Rollout
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
+        # NOTE: 2.2 添加 Critic
         self.add_critic_worker(config)
 
+        # NOTE: 2.3 添加奖励模型
         # We should adopt a multi-source reward function here:
         # - for rule-based rm, we directly call a reward score
         # - for model-based rm, we call a model
@@ -273,9 +282,12 @@ class TaskRunner:
         # The reward type depends on the tag of the data
         self.add_reward_model_worker(config)
 
+        # NOTE: 2.4 添加参考策略
+        # NOTE: 复用 Actor Rollout Worker 类
         # Add a reference policy worker if KL loss or KL reward is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
 
+        # NOTE: 2.5 验证配置
         # validate config
         validate_config(
             config=config,
@@ -285,25 +297,26 @@ class TaskRunner:
 
         # Download the checkpoint from HDFS to the local machine.
         # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
-        # NOTE: 1. 模型下载
+        # NOTE: 3. 模型下载
         # NOTE: 将模型文件从 HDFS 远程路径复制到本地，确保所有 Worker 都可以访问，使用共享内存（`use_shm`）可以加速模型加载
         local_path = copy_to_local(
             config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False)
         )
 
-        # NOTE: 2. Tokenizer 和 Processor 初始化
         # Instantiate the tokenizer and processor.
         from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
-        # NOTE: AutoTokenizer 然后对于没有 pad_token 的 tokenizer，设置 pad_token 为 eos_token，pad_token_id 为 eos_token_id
+        # NOTE: 4. 获取 Tokenizer
+        # NOTE: AutoTokenizer 对于没有 pad_token 的 tokenizer，设置 pad_token 为 eos_token，pad_token_id 为 eos_token_id
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        # NOTE: 5. 获取 Processor
         # NOTE: AutoProcessor
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
         # Load the reward manager for training and validation.
-        # NOTE: 8. 加载奖励管理器
+        # NOTE: 6. 加载奖励管理器
         reward_fn = load_reward_manager(
             config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
         )
@@ -311,19 +324,20 @@ class TaskRunner:
             config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
         )
 
+        # NOTE: 7. 初始化资源池管理器
         resource_pool_manager = self.init_resource_pool_mgr(config)
 
         from verl.utils.dataset.rl_dataset import collate_fn
 
         # Create training and validation datasets.
-        # NOTE: 9. 创建训练和验证数据集 Dataset 类
+        # NOTE: 8. 创建训练和验证数据集 Dataset 类
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, is_train=True)
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False)
         # NOTE: 随机采样 or 顺序采样
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.
-        # NOTE: 10. 创建 RayPPOTrainer 实例，它是管理所有计算资源和训练流程的中央协调器
+        # NOTE: 9. 创建 RayPPOTrainer 实例，它是管理所有计算资源和训练流程的中央协调器
         trainer = RayPPOTrainer(
             config=config,
             tokenizer=tokenizer,
@@ -339,12 +353,12 @@ class TaskRunner:
             train_sampler=train_sampler,
         )
         # Initialize the workers of the trainer.
-        # NOTE: 11. 初始化训练器的 Workers
-        # NOTE: 调用 RayPPOTrainer 的 init_workers() 方法，将配置的 Worker 类实例化到 Ray 集群的 GPU 上，为实际计算做准备
+        # NOTE: 10. 初始化训练器的 Workers
+        # NOTE: 调用 RayPPOTrainer 的 init_workers()，将配置的 Worker 类实例化到 Ray 集群的 GPU 上，为实际计算做准备
         trainer.init_workers()
 
         # Start the training process.
-        # NOTE: 12. 启动训练过程
+        # NOTE: 11. 启动训练过程
         # NOTE: 调用 RayPPOTrainer 的 fit() 方法，启动 PPO 训练循环
         trainer.fit()
 
