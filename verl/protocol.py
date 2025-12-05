@@ -390,7 +390,11 @@ class DataProto:
 
     def __getstate__(self):
         if version.parse(tensordict.__version__) >= version.parse("0.5.0") and self.batch is not None:
-            batch = self.batch.contiguous().consolidate()
+            # Check if batch is empty to avoid torch.cat error in consolidate
+            if len(self.batch.keys()) > 0:
+                batch = self.batch.contiguous().consolidate()
+            else:
+                batch = self.batch
         else:
             batch = self.batch
 
@@ -552,6 +556,47 @@ class DataProto:
         if auto_padding:
             meta_info[DataProtoConfig.auto_padding_key] = True
         return cls(batch=tensor_dict, non_tensor_batch=non_tensors, meta_info=meta_info)
+
+    @classmethod
+    def from_tensordict(
+        cls,
+        tensor_dict: TensorDict = None,
+        meta_info=None,
+        num_batch_dims=1,
+    ):
+        """Create a DataProto from a TensorDict. This assumes that
+        1. All the tensor in tensor_dict have the same dim0
+        2. Only dim0 is the batch dim
+        """
+        assert version.parse(tensordict.__version__) >= version.parse("0.10.0"), (
+            "Build DataProto from TensorDict at least requires tensordict version 0.10.0"
+        )
+        from tensordict import NonTensorData, NonTensorStack
+
+        assert num_batch_dims > 0, "num_batch_dims must be greater than zero"
+        if not all(isinstance(val, torch.Tensor) for val in tensor_dict.values()):
+            assert num_batch_dims == 1, "only support num_batch_dims=1 when tensor_dict contains non tensor data."
+
+        if meta_info is None:
+            meta_info = {}
+        batch = {}
+        non_tensor_batch = {}
+        batch_size = None
+        for key, val in tensor_dict.items():
+            if isinstance(val, torch.Tensor):
+                batch[key] = val
+                if batch_size is None:
+                    batch_size = val.shape[:num_batch_dims]
+            elif isinstance(val, NonTensorStack):
+                non_tensor_batch[key] = np.array([elem.data for elem in val], dtype=object)
+            elif isinstance(val, NonTensorData):
+                meta_info[key] = val.data
+
+        return cls(
+            batch=TensorDict(batch, batch_size=batch_size),
+            non_tensor_batch=non_tensor_batch,
+            meta_info=meta_info,
+        )
 
     def to(self, device) -> "DataProto":
         """move the batch to device
@@ -1081,6 +1126,8 @@ class DataProto:
         tensor_batch = self.batch.to_dict()
         non_tensor_batch = self.non_tensor_batch
 
+        from tensordict.tensorclass import NonTensorData, NonTensorStack
+
         from verl.utils import tensordict_utils as tu
 
         common_keys = set(tensor_batch.keys()) & set(non_tensor_batch.keys())
@@ -1088,7 +1135,8 @@ class DataProto:
 
         for key, val in non_tensor_batch.items():
             assert isinstance(val, np.ndarray)
-            tensor_batch[key] = val.tolist()
+            # Convert to NonTensorStack instead of plain list to handle nested structures
+            tensor_batch[key] = NonTensorStack.from_list([NonTensorData(item) for item in val])
         output = tu.get_tensordict(tensor_dict=tensor_batch, non_tensor_dict=self.meta_info)
         return output
 
@@ -1179,8 +1227,17 @@ class DataProtoFuture:
     def get(self):
         output = ray.get(self.futures)  # dp_size.
         for o in output:
-            assert isinstance(o, DataProto)
-        output = self.collect_fn(output)  # select dp, concat
+            assert isinstance(o, DataProto | TensorDict)
+
+        if isinstance(output[0], DataProto):
+            output = DataProto.concat(output)  # select dp, concat
+        elif isinstance(output[0], TensorDict):
+            from verl.utils.tensordict_utils import concat_tensordict
+
+            output = concat_tensordict(output)
+        else:
+            raise TypeError(f"Unknown type {type(o[0])} in DataProtoFuture")
+
         if self.dispatch_fn is not None:
             output = self.dispatch_fn(output)  # split in batch dim, select using dp
         return output

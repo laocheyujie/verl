@@ -16,10 +16,10 @@ import asyncio
 import json
 import logging
 import os
-import pickle
 from pprint import pprint
 from typing import Any, Callable, Optional
 
+import cloudpickle as pickle
 import numpy as np
 import ray
 import vllm.entrypoints.cli.serve
@@ -32,6 +32,7 @@ from vllm.entrypoints.openai.api_server import (
     init_app_state,
 )
 from vllm.inputs import TokensPrompt
+from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, get_tcp_uri
@@ -42,10 +43,17 @@ from vllm.v1.executor.abstract import Executor
 
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils.config import omega_conf_to_dataclass
-from verl.workers.config import HFModelConfig, RewardModelConfig, RolloutConfig
+from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
+from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.utils import get_free_port, run_unvicorn
+from verl.workers.rollout.utils import get_free_port, is_valid_ipv6_address, run_unvicorn
 from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
+from verl.workers.rollout.vllm_rollout.utils import (
+    VLLM_LORA_INT_ID,
+    VLLM_LORA_NAME,
+    VLLM_LORA_PATH,
+    get_vllm_max_lora_rank,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -66,6 +74,8 @@ class ExternalZeroMQDistributedExecutor(Executor):
         self.sockets = []
         for address in addresses:
             socket = self.context.socket(zmq.REQ)
+            if address.startswith("tcp://["):
+                socket.setsockopt(zmq.IPV6, 1)
             socket.connect(address)
             self.sockets.append(socket)
 
@@ -86,6 +96,7 @@ class ExternalZeroMQDistributedExecutor(Executor):
         timeout: Optional[float] = None,
         args: tuple = (),
         kwargs: Optional[dict[str, Any]] = None,
+        **kwargs_extra: Any,
     ) -> list[Any]:
         if isinstance(method, str):
             sent_method = method
@@ -100,14 +111,17 @@ class ExternalZeroMQDistributedExecutor(Executor):
         outputs = []
         for socket in self.sockets:
             outputs.append(pickle.loads(socket.recv()))
+
+        for output in outputs:
+            if isinstance(output, Exception):
+                raise output
         return outputs
 
     def check_health(self):
         return
 
 
-@ray.remote(num_cpus=1)
-class vLLMHttpServer:
+class vLLMHttpServerBase:
     """vLLM http server in single node, this is equivalent to launch server with command line:
     ```
     vllm serve --tensor-parallel-size=8 ...
@@ -116,7 +130,7 @@ class vLLMHttpServer:
 
     def __init__(
         self,
-        config: RolloutConfig | RewardModelConfig,
+        config: RolloutConfig,
         model_config: HFModelConfig,
         rollout_mode: RolloutMode,
         workers: list[ActorHandle],
@@ -127,7 +141,7 @@ class vLLMHttpServer:
     ):
         """
         Args:
-            config (RolloutConfig | RewardModelConfig): full config.
+            config (RolloutConfig): full config.
             model_config (HFModelConfig): model config.
             rollout_mode (RolloutMode): rollout mode.
             replica_rank (int): replica rank, a replica may contain multiple nodes.
@@ -137,7 +151,7 @@ class vLLMHttpServer:
         """
         super().__init__()
 
-        self.config: RolloutConfig | RewardModelConfig = omega_conf_to_dataclass(config)
+        self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
         self.config.max_model_len = self.config.prompt_length + self.config.response_length
         self.rollout_mode = rollout_mode
@@ -202,12 +216,26 @@ class vLLMHttpServer:
             max_new_tokens=self.config.response_length,
         )
         logger.info(f"override_generation_config: {override_generation_config}")
-
+        quantization = self.config.quantization
+        if quantization is not None:
+            if quantization == "fp8":
+                FP8_BLOCK_QUANT_KWARGS = {
+                    "activation_scheme": "dynamic",
+                    "fmt": "e4m3",
+                    "quant_method": "fp8",
+                    "weight_block_size": [128, 128],
+                }
+                fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
+                # Apply vllm fp8 patches
+                # Will remove the patch after vllm support on-the-fly quant for rollout natively.
+                apply_vllm_fp8_patches()
+            else:
+                raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
         args = {
             "dtype": self.config.dtype,
             "load_format": self.config.load_format,
             "skip_tokenizer_init": False,
-            "trust_remote_code": True,
+            "trust_remote_code": self.model_config.trust_remote_code,
             "max_model_len": self.config.max_model_len,
             "max_num_seqs": self.config.max_num_seqs,
             "enable_chunked_prefill": self.config.enable_chunked_prefill,
@@ -221,8 +249,20 @@ class vLLMHttpServer:
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
             "seed": self.config.get("seed", 0),
             "override_generation_config": json.dumps(override_generation_config),
+            "quantization": quantization,
+            "hf_overrides": {"quantization_config": fp8_block_quant_kwargs} if quantization == "fp8" else None,
             **engine_kwargs,
         }
+
+        if self.config.prometheus.enable:
+            if self.config.prometheus.served_model_name:
+                # Extract model name from path if it's a full path
+                served_model_name = self.config.prometheus.served_model_name
+                if "/" in served_model_name:
+                    # If it's a full path, extract the last part as model name
+                    served_model_name = served_model_name.split("/")[-1]
+                args["served_model_name"] = served_model_name
+
         if self.config.expert_parallel_size > 1:
             assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
                 "gpus_per_node should be divisible by tensor_model_parallel_size"
@@ -244,14 +284,28 @@ class vLLMHttpServer:
                 }
             )
 
+        # update lora-related args
+        if self.model_config.lora_rank > 0:
+            args.update(
+                {
+                    "enable_lora": True,
+                    "max_loras": 1,
+                    "max_lora_rank": get_vllm_max_lora_rank(self.model_config.lora_rank),
+                }
+            )
+
+        if self.config.enable_rollout_routing_replay:
+            args.update({"enable_return_routed_experts": True})
+
         server_args = ["serve", self.model_config.local_path]
         for k, v in args.items():
             if isinstance(v, bool):
                 if v:
                     server_args.append(f"--{k}")
-            else:
+            elif v is not None:
                 server_args.append(f"--{k}")
-                server_args.append(str(v))
+                # Use json.dumps for dict to ensure valid JSON format
+                server_args.append(json.dumps(v) if isinstance(v, dict) else str(v))
 
         if self.replica_rank == 0:
             pprint(server_args)
@@ -354,7 +408,20 @@ class vLLMHttpServer:
         prompt = TokensPrompt(
             prompt_token_ids=prompt_ids, multi_modal_data={"image": image_data} if image_data else None
         )
-        generator = self.engine.generate(prompt=prompt, sampling_params=sampling_params, request_id=request_id)
+
+        # Add lora request
+        lora_request = None
+        if self.model_config.lora_rank > 0:
+            # Make sure we also check that the lora is already loaded in the engine
+            lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
+            if lora_loaded:
+                lora_request = LoRARequest(
+                    lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
+                )
+
+        generator = self.engine.generate(
+            prompt=prompt, sampling_params=sampling_params, request_id=request_id, lora_request=lora_request
+        )
 
         # Get final response
         final_res: Optional[RequestOutput] = None
@@ -366,7 +433,12 @@ class vLLMHttpServer:
         log_probs = None
         if sampling_params.logprobs is not None:
             log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
-        return TokenOutput(token_ids=token_ids, log_probs=log_probs)
+
+        routed_experts = None
+        if self.config.enable_rollout_routing_replay:
+            routed_experts = final_res.outputs[0].routed_experts
+
+        return TokenOutput(token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts)
 
     async def wake_up(self):
         if self.rollout_mode == RolloutMode.HYBRID:
@@ -391,14 +463,51 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
+    async def clear_kv_cache(self):
+        if self.node_rank == 0:
+            await self.engine.reset_prefix_cache()
+
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
+
+
+@ray.remote(num_cpus=1)
+class vLLMHttpServer(vLLMHttpServerBase):
+    """vLLM http server in single node, this is equivalent to launch server with command line:
+    ```
+    vllm serve --tensor-parallel-size=8 ...
+    ```
+    """
+
+    def __init__(
+        self,
+        config: RolloutConfig,
+        model_config: HFModelConfig,
+        rollout_mode: RolloutMode,
+        workers: list[ActorHandle],
+        replica_rank: int,
+        node_rank: int,
+        gpus_per_node: int,
+        nnodes: int,
+    ):
+        super().__init__(config, model_config, rollout_mode, workers, replica_rank, node_rank, gpus_per_node, nnodes)
 
 
 _rollout_worker_actor_cls = ray.remote(vLLMAsyncRollout)
 
 
 class vLLMReplica(RolloutReplica):
+    def __init__(
+        self,
+        replica_rank: int,
+        config: RolloutConfig,
+        model_config: HFModelConfig,
+        gpus_per_node: int = 8,
+        is_reward_model: bool = False,
+    ):
+        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
+        self.server_class = vLLMHttpServer
+
     def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
         """Get rollout worker actor class for colocated and standalone mode."""
         worker_dict_cls = RayClassWithInitArgs(
@@ -433,12 +542,17 @@ class vLLMReplica(RolloutReplica):
         for node_rank in range(nnodes):
             workers = self.workers[node_rank * gpus_per_node : (node_rank + 1) * gpus_per_node]
             node_id = worker_node_ids[node_rank * gpus_per_node]
-            server = vLLMHttpServer.options(
+            name = (
+                f"vllm_server_{self.replica_rank}_{node_rank}"
+                if not self.is_reward_model
+                else f"vllm_server_reward_{self.replica_rank}_{node_rank}"
+            )
+            server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
                     soft=False,
                 ),
-                name=f"vllm_server_{self.replica_rank}_{node_rank}",
+                name=name,
             ).remote(
                 config=self.config,
                 model_config=self.model_config,
@@ -463,7 +577,11 @@ class vLLMReplica(RolloutReplica):
         # get http server address from first server
         server_address, server_port = await self.servers[0].get_server_address.remote()
         self._server_handle = self.servers[0]
-        self._server_address = f"{server_address}:{server_port}"
+        self._server_address = (
+            f"[{server_address}]:{server_port}"
+            if is_valid_ipv6_address(server_address)
+            else f"{server_address}:{server_port}"
+        )
 
     async def sleep(self):
         """Sleep each rollout server."""

@@ -27,6 +27,7 @@ __all__ = [
     "AgentLoopConfig",
     "TraceConfig",
     "ServerConfig",
+    "PrometheusConfig",
     "RolloutConfig",
 ]
 
@@ -67,6 +68,7 @@ class CustomAsyncServerConfig(BaseConfig):
 @dataclass
 class AgentLoopConfig(BaseConfig):
     num_workers: int = 8
+    default_agent_loop: str = "single_turn_agent"
     agent_loop_config_path: Optional[str] = None
     custom_async_server: CustomAsyncServerConfig = field(default_factory=CustomAsyncServerConfig)
 
@@ -75,6 +77,11 @@ class AgentLoopConfig(BaseConfig):
 class TraceConfig(BaseConfig):
     backend: Optional[str] = None
     token2text: bool = False
+    max_samples_per_step_per_worker: Optional[int] = None
+
+    def __post_init__(self):
+        if self.max_samples_per_step_per_worker is not None and self.max_samples_per_step_per_worker < 0:
+            raise ValueError("`max_samples_per_step_per_worker` must be a non-negative integer or null.")
 
 
 @dataclass
@@ -91,11 +98,27 @@ class ServerConfig(BaseConfig):
 
 
 @dataclass
+class PrometheusConfig(BaseConfig):
+    """
+    Configuration for Prometheus server
+    """
+
+    # whether enable prometheus on server mode rollout
+    enable: bool = False
+    # Port number that Prometheus listens on, default is 9090
+    port: int = 9090
+    # Path to Prometheus configuration file
+    file: str = "/tmp/ray/session_latest/metrics/prometheus/prometheus.yml"
+    # Specify served_model_name to avoid displaying overly long model paths in Grafana
+    served_model_name: Optional[str] = None
+
+
+@dataclass
 class RolloutConfig(BaseConfig):
     _mutable_fields = {"max_model_len", "load_format"}
 
     name: Optional[str] = MISSING
-    mode: str = "sync"
+    mode: str = "async"
     skip_tokenizer_init: bool = True
 
     temperature: float = 1.0
@@ -120,6 +143,7 @@ class RolloutConfig(BaseConfig):
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
     tensor_model_parallel_size: int = 2
+    pipeline_model_parallel_size: int = 1
     max_num_batched_tokens: int = 8192
 
     # TODO: enable train_kwargs
@@ -152,6 +176,9 @@ class RolloutConfig(BaseConfig):
     # Server configuration for sglang server mode
     server: ServerConfig = field(default_factory=ServerConfig)
 
+    # Use Prometheus to collect and monitor rollout statistics
+    prometheus: PrometheusConfig = field(default_factory=PrometheusConfig)
+
     update_weights_bucket_megabytes: int = 512
 
     skip_rollout: bool = False
@@ -176,9 +203,18 @@ class RolloutConfig(BaseConfig):
 
     skip_tokenizer_init: bool = False
 
+    quantization: Optional[str] = None
+    enable_rollout_routing_replay: bool = False
+
     def __post_init__(self):
         """Validate the rollout config"""
         if self.expert_parallel_size > 1:
             assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (
                 "expert_parallel_size must be equal to tensor_model_parallel_size * data_parallel_size"
             )
+
+        if self.pipeline_model_parallel_size > 1:
+            if self.name == "vllm" or self.name == "sglang":
+                raise NotImplementedError(
+                    f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
+                )
