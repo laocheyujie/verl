@@ -600,7 +600,7 @@ class SGLangRollout(BaseRollout):
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
         if self.config.multi_turn.enable:
-            # NOTE: 如果是用了 mutli-turn 训练，则将 batch 的 requests 拆为单个 request，调用 _req_level_generate_sequences
+            # NOTE: 如果用了 mutli-turn 训练，则将 batch 的 requests 拆为单个 request 调用 _req_level_generate_sequences
             return self._req_level_generate_sequences(prompts, **kwargs)
         # NOTE: 不调用 tool 的单轮 RL，仍旧组 batch 直接发送
         return self._batch_level_generate_sequences(prompts, **kwargs)
@@ -828,7 +828,6 @@ class SGLangRollout(BaseRollout):
         finish_reason_type = None
         output = None
 
-        # NOTE: 通过一个 while 循环来处理多轮对话
         current_turns = 0
         user_turns = 0
         user_turn_rewards = []
@@ -865,15 +864,21 @@ class SGLangRollout(BaseRollout):
         # Update with any additional kwargs
         request_sampling_params.update(kwargs)
 
+        # NOTE: 通过一个 while 循环来处理多轮对话，
+        # 循环次数上限由 self.config.multi_turn.max_turns 控制，或者 requests 返回 FinishReasonTypeEnum.STOP
         while current_turns < self.config.multi_turn.max_assistant_turns:
+            # NOTE: 根据 _req 的当前状态 (AsyncRolloutRequestStateEnum) 执行不同的操作
             if _req.state == AsyncRolloutRequestStateEnum.PENDING:
+                # NOTE: 如果请求处于 PENDING 状态，则调用 self._handle_pending_state(_req) 初始化
                 await self._handle_pending_state(_req)
                 _req.state = AsyncRolloutRequestStateEnum.RUNNING
             elif _req.state == AsyncRolloutRequestStateEnum.TOOL_CALLING:
+                # NOTE: 检查最后一条消息的工具调用信息
                 if _req.messages[-1].tool_calls is not None:
                     parsed_tool_calls = _req.messages[-1].tool_calls
                     if self.config.skip_tokenizer_init:
                         _req.messages[-1].tool_calls = None
+                    # NOTE: 解析工具调用信息，并通过 asyncio.gather 并发地执行每个工具调用
                     tool_call_results = await asyncio.gather(
                         *[
                             self._tool_map[tool_call.function.name].execute(
@@ -884,6 +889,7 @@ class SGLangRollout(BaseRollout):
                             for tool_call in parsed_tool_calls
                         ]
                     )
+                    # NOTE: 将工具的响应添加到消息历史中
                     _req.add_tool_response_messages(self.processing_class, [resp for resp, _, _ in tool_call_results])
                     for tool_call, (resp, reward, metrics) in zip(parsed_tool_calls, tool_call_results, strict=True):
                         _req.update_metrics(metrics, tool_call.function.name)
@@ -1126,7 +1132,7 @@ class SGLangRollout(BaseRollout):
         tgt_device = prompts.batch["input_ids"].device
 
         if self._tp_rank == 0:
-            # NOTE: 如果当前是 tp rank 0，则将一整个 batch 的 prompts 预处理成单个异步请求，并并发执行这些请求以生成序列
+            # NOTE: 如果当前是 tp rank 0，则将一整个 batch 的 prompts 预处理成单个异步请求，并发执行这些请求以生成序列
             req_list = self._preprocess_prompt_to_async_rollout_requests(
                 prompts,
             )
@@ -1484,7 +1490,8 @@ class SGLangRollout(BaseRollout):
                 raise TypeError(f"raw_prompt must be a list or numpy array, got {type(raw_prompt)}")
 
             # NOTE: 每个生成的请求都有唯一的 batch_data_id 和 rollout_offset 标识
-            # NOTE: 每个请求对象包含状态管理、工具配置、序列长度限制、tokenizer 配置等元数据，为后续的异步处理提供完整信息
+            # NOTE: 每个请求对象包含状态管理、工具配置、序列长度限制、tokenizer 配置等元数据，
+            # 为后续的异步处理提供完整信息
             req = AsyncRolloutRequest(
                 batch_data_id=data_idx,
                 rollout_offset=0,

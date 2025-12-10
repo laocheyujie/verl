@@ -433,7 +433,9 @@ class DataParallelPPOActor(BasePPOActor):
 
         metrics = {}
         for _ in range(self.config.ppo_epochs):
+            # NOTE: 第一层 ppo_epochs 循环，代表 off-policy，即一个 batch 的经验被用来更新多少次模型
             for batch_idx, mini_batch in enumerate(mini_batches):
+                # NOTE: 第二层循环将 train_batch_size 按 ppo_mini_batch_size 切分，每个 ppo_mini_batch 更新一次参数
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
@@ -446,6 +448,7 @@ class DataParallelPPOActor(BasePPOActor):
                 self.actor_optimizer.zero_grad()
 
                 for micro_batch in micro_batches:
+                    # NOTE: 第三层循环将 ppo_mini_batch 拆成更小的 micro_batch，做多次前向和反向累积好梯度后更新一次参数
                     micro_batch = micro_batch.to(get_device_id())
                     micro_batch_metrics = {}
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}

@@ -123,6 +123,7 @@ class AsyncRolloutRequest(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def initialize_request(cls, values):
+        # NOTE: 验证必需字段 messages, max_prompt_len, tokenizer
         if not (messages := values.get("messages")):
             raise ValueError("messages is required for AsyncRolloutRequest initialization")
         if not (max_prompt_len := values.get("max_prompt_len")):
@@ -145,11 +146,12 @@ class AsyncRolloutRequest(BaseModel):
         if not values.get("multi_modal_inputs"):
             values["multi_modal_inputs"] = {}
 
-        # NOTE: 使用 tokenizer 的 chat_template 处理消息，初始化所有序列相关字段 (input_ids, attention_mask, position_ids, loss_mask), 计算生成提示的位置信息
         tools = (
             [tool.model_dump() for tool in tool_schemas] if (tool_schemas := values.get("tool_schemas", [])) else None
         )
 
+        # NOTE: 使用 tokenizer 的 chat_template 处理消息，
+        # 初始化所有序列相关字段 (input_ids, attention_mask, position_ids, loss_mask), 计算生成提示的位置信息
         multi_modal_data = values["multi_modal_data"]
         tokens_without_prompt = cls._handle_apply_chat_template(
             processing_class,

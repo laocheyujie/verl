@@ -195,7 +195,151 @@ def run_ppo(config) -> None:
         5. 生成 `generate()`
             - Rollout 引擎使用刚刚同步过来的最新权重进行推理
 
-看到了 fsdp_workers.py init_model
+
+## RayPPOTrainer
+### fit
+1. 创建 Tracking 日志记录器
+2. 设置全局步数
+3. 加载模型检查点和数据集 dataloader
+    1. 获取检查点步数
+        - `config.trainer.resume_mode == "auto"`: `global_steps` 为 `latest_checkpointed_iteration.txt` 记录的值
+        - `config.trainer.resume_mode == "resume_path"`: `global_steps` 为 `resume_from_path` 的 `global_step_xxx` 值
+    2. 加载 actor 权重
+    3. 加载 critic 权重 (如果设置了 `use_critic`)
+    4. 加载 dataloader
+4. `for epoch in range(total_epochs)` 遍历配置的总 epoch 数
+5. `for batch in self.train_dataloader` 每个 epoch 内再遍历 train_dataloader
+6. 从 batch 中分离出用于 rollout 的数据 (`input_ids`, `attention_mask`, `position_ids`)，保留其他数据用于后续处理
+7. 为每个样本分配唯一 ID，重复数据 `config.actor_rollout_ref.rollout.n` 次以对齐多次采样
+8. 调用 `ActorRolloutWorker` 生成序列，并记录生成时间
+9. 处理 REMAX 基线 (如果 `adv_estimator == 'remax'`)：生成确定性基线序列，计算基线奖励，用于 REMAX 优势估计器
+10. 计算响应掩码 `response_mask`，并可选地进行批次平衡
+11. 根据配置使用奖励模型或自定义奖励函数计算 token 级别的奖励分数 `reward_tensor`，支持同步和异步计算
+12. 使用 megatron 基于训练开始前的 policy 重新计算 behaviour policy 的 `old_log_probs`，用于**重要性采样**，同时计算熵值
+13. 使用 Reference policy 计算 `ref_log_probs`，用于 **KL 散度计算**
+14. 使用 Critic 网络计算状态价值 `values`，用于**优势函数估计**
+15. 根据配置的优势估计器 (GAE、GRPO、REMAX 等) 计算优势函数 `adv`，支持 KL 惩罚
+16. 使用计算出的优势函数更新 `Critic` 网络参数
+17. 在 Critic 预热完成后，使用 PPO 损失函数更新 `Actor` 网络参数 (`actor_rollout_wg.update_actor(batch)` -> `actor.update_policy(data=data)`)
+    1. 第一层 ppo_epochs 循环，代表 off-policy，即一个 batch 的经验被用来更新多少次模型
+    2. 第二层循环将 train_batch_size 按 ppo_mini_batch_size 切分，每个 ppo_mini_batch 更新一次参数
+    3. 第三层循环将 ppo_mini_batch 拆成更小的 micro_batch，做多次前向和反向累积好梯度后更新一次参数
+18. 将生成的序列、输入、输出和分数保存到指定目录
+19. 根据配置的频率执行验证，计算验证指标并记录
+20. 根据配置的频率保存模型检查点
+    1. 保存 actor 权重
+    2. 保存 critic 权重 (如果设置了 `use_critic`)
+    3. 保存 dataloader 的 state_dict
+    4. 把当前的步数写入 `latest_checkpointed_iteration.txt`
+21. 收集训练指标、时序指标和吞吐量指标，并记录到日志系统
+
+### 训练数据流
+1. Parquet 文件 
+2. RLHFDataset
+3. DataLoader + collate_fn 
+4. DataProto 原始数据 
+5. pop 提取生成数据 
+6. Rollout 生成 
+7. union 合并数据 
+8. 奖励计算 
+9. 优势计算 
+10. 重新计算 old_log_probs 
+11. 计算参考 ref_log_probs 
+12. 计算价值函数 values
+13. 更新 critic
+14. 更新 actor
+15. 返回训练指标
+
+```py
+# Parquet 文件
+data_files = "~/data/rlhf/gsm8k/train.parquet"
+
+# RLHFDataset
+dataset = RLHFDataset(
+    data_files=data_files,
+    tokenizer=tokenizer,
+    config=config,
+    processor=processor
+)
+
+# DataLoader + collate_fn
+dataloader = DataLoader(
+    dataset=dataset,
+    batch_size=16,
+    shuffle=True,
+    drop_last=True,
+    collate_fn=collate_fn
+)
+
+# DataProto 原始数据
+batch_dict = next(iter(dataloader))  # 返回 dict
+batch: DataProto = DataProto.from_single_dict(batch_dict)
+
+# pop 提取生成数据
+gen_batch = batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"])
+
+# Rollout 生成
+gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+
+# union 合并数据
+batch = batch.union(gen_batch_output)
+
+# 计算奖励分数 rewards
+rewards = self.reward_fn(batch)
+batch.batch["token_level_rewards"] = rewards
+
+# 重新计算 old_log_probs
+old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+batch = batch.union(old_log_prob)
+
+# 计算 reference model 的 ref_log_probs
+if self.use_reference_policy:
+    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+    batch = batch.union(ref_log_prob)
+
+# 计算价值函数 values
+if self.use_critic:
+    values = self.critic_wg.compute_values(batch)
+    batch = batch.union(values)
+
+# 优势计算
+# 核心实现位于：verl/trainer/ppo/core_algos.py
+batch = compute_advantage(batch, adv_estimator=self.config.algorithm.adv_estimator)
+
+# 更新 critic
+if self.use_critic:
+    critic_output = self.critic_wg.update_critic(batch)
+    critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
+    metrics.update(critic_output_metrics)
+
+# 更新 actor
+actor_output = self.actor_rollout_wg.update_actor(batch)
+
+# 返回训练指标
+actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+metrics.update(actor_output_metrics)
+logger.log(data=metrics, step=self.global_steps)
+```
+
+
+## Ray
+概念：
+- 资源池 `RayResourcePool`：通过不同的资源池名称来划分 CPU、GPU 资源，可以共享资源，比如 `resource_pool_1` 使用 4 个 GPU；`resource_pool_2` 使用 4 个 GPU；`resource_pool_merge` 使用上面两个合并后的结果
+- `Worker`：继承了 `Worker` 的类，实际管理 RL 的数据流
+- `RayClassWithInitArgs`：把 `Worker` 和初始化参数绑定好的类，用于**延迟初始化 Worker**
+- `RayWorkerGroup`：把 `RayResourcePool` 和 `RayClassWithInitArgs` 绑定到一个 Worker 组里，只用于分布式系统的资源调度
+
+流程：
+1. 先定义一个 `Worker` 类（为避免每次都用 `execute_all_sync` 下发任务，可以在类方法中加上 `@register(Dispatch.ONE_TO_ALL)` 装饰器）
+2. 再结合初始化参数绑定到 `RayClassWithInitArgs`
+3. 定义好资源池 `RayResourcePool`
+4. 根据资源池 `RayResourcePool` 和 `RayClassWithInitArgs` 创建 Worker 组 `RayWorkerGroup`
+
+具体用法：`examples/ray/tutorial.ipynb`
+
+
+
+
 
 ## 变量
 ### self.role_worker_mapping
@@ -251,28 +395,6 @@ def run_ppo(config) -> None:
     }
 }
 ```
-
-## RayPPOTrainer
-### fit
-1. 创建 Tracking 日志记录器
-2. 设置全局步数
-3. 加载模型检查点和数据集 dataloader
-    1. 获取检查点步数
-        - `config.trainer.resume_mode == "auto"`: `global_steps` 为 `latest_checkpointed_iteration.txt` 记录的值
-        - `config.trainer.resume_mode == "resume_path"`: `global_steps` 为 `resume_from_path` 的 `global_step_xxx` 值
-    2. 加载 actor 权重
-    3. 加载 critic 权重 (如果设置了 `use_critic`)
-    4. 加载 dataloader
-4. `for epoch in range(total_epochs)` 遍历配置的总 epoch 数
-5. `for batch in self.train_dataloader` 每个 epoch 内再遍历 train_dataloader
-6. 从 batch 中分离出用于 rollout 的数据 (`input_ids`, `attention_mask`, `position_ids`)，保留其他数据用于后续处理
-7. 每个 batch 重复 `config.actor_rollout_ref.rollout.n` 个
-8. 调用 `ActorRolloutWorker` 生成序列，并记录生成时间
-9. 处理 REMAX 基线 (如果 `adv_estimator == 'remax'`)：生成确定性基线序列，计算基线奖励，用于 REMAX 优势估计器
-
-
-
-
 
 ## 显存问题
 - `.from_pretrained(...)` (在 `init_context` 中): 负责从硬盘读取权重，并将其“逻辑上”关联到 `meta` 设备的模型空壳上，此过程不消耗显存。
@@ -392,126 +514,6 @@ def run_ppo(config) -> None:
 
 
 
-
-## Ray
-概念：
-    - 资源池 `RayResourcePool`：通过不同的资源池名称来划分 CPU、GPU 资源，可以共享资源，比如 `resource_pool_1` 使用 4 个 GPU；`resource_pool_2` 使用 4 个 GPU；`resource_pool_merge` 使用上面两个合并后的结果
-    - `Worker`：继承了 `Worker` 的类，实际管理 RL 的数据流
-    - `RayClassWithInitArgs`：把 `Worker` 和初始化参数绑定好的类，用于**延迟初始化 Worker**
-    - `RayWorkerGroup`：把 `RayResourcePool` 和 `RayClassWithInitArgs` 绑定到一个 Worker 组里，只用于分布式系统的资源调度
-
-流程：
-1. 先定义一个 `Worker` 类（为避免每次都用 `execute_all_sync` 下发任务，可以在类方法中加上 `@register(Dispatch.ONE_TO_ALL)` 装饰器）
-2. 再结合初始化参数绑定到 `RayClassWithInitArgs`
-3. 定义好资源池 `RayResourcePool`
-4. 根据资源池 `RayResourcePool` 和 `RayClassWithInitArgs` 创建 Worker 组 `RayWorkerGroup`
-
-具体用法：`examples/ray/tutorial.ipynb`
-
-
-## 数据流
-A：Parquet 文件 --> B：RLHFDataset --> C：DataLoader + collate_fn --> D：DataProto 原始数据 --> E：pop 提取生成数据 --> F：Rollout 生成 --> G：union 合并数据 --> H：奖励计算 --> I：优势计算 --> J：重新计算 log_probs --> K：计算参考 log_probs --> L：计算价值函数 --> M1：更新 critic --> M2：更新 actor --> N：返回训练指标
-
-
-### Parquet 文件
-```py
-data_files = "~/data/rlhf/gsm8k/train.parquet"
-```
-
-### RLHFDataset
-```py
-dataset = RLHFDataset(
-    data_files=data_files,
-    tokenizer=tokenizer,
-    config=config,
-    processor=processor
-)
-```
-
-### DataLoader + collate_fn
-```py
-dataloader = DataLoader(
-    dataset=dataset,
-    batch_size=16,
-    shuffle=True,
-    drop_last=True,
-    collate_fn=collate_fn
-)
-```
-
-### DataProto 原始数据
-```py
-batch_dict = next(iter(dataloader))  # 返回 dict
-batch: DataProto = DataProto.from_single_dict(batch_dict)
-```
-
-### pop 提取生成数据
-```py
-gen_batch = batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"])
-```
-
-### Rollout 生成
-```py
-gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-```
-
-### union 合并数据
-```py
-batch = batch.union(gen_batch_output)
-```
-
-### 奖励计算
-```py
-rewards = self.reward_fn(batch)
-batch.batch["token_level_rewards"] = rewards
-```
-
-### 优势计算
-```py
-batch = compute_advantage(batch, adv_estimator=self.config.algorithm.adv_estimator)
-```
-核心实现位于：verl/trainer/ppo/core_algos.py
-
-### 重新计算 log_probs
-```py
-old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-batch = batch.union(old_log_prob)
-```
-
-### 计算 reference model 的 log_probs
-```py
-if self.use_reference_policy:
-    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
-    batch = batch.union(ref_log_prob)
-```
-
-### 计算 value function
-```py
-if self.use_critic:
-    values = self.critic_wg.compute_values(batch)
-    batch = batch.union(values)
-```
-
-### 更新 critic
-```py
-if self.use_critic:
-    critic_output = self.critic_wg.update_critic(batch)
-    critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
-    metrics.update(critic_output_metrics)
-```
-
-### 更新 actor
-```py
-actor_output = self.actor_rollout_wg.update_actor(batch)
-```
-
-### 返回训练指标
-```py
-actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-metrics.update(actor_output_metrics)
-logger.log(data=metrics, step=self.global_steps)
-```
-
 ## 权重转换
 > https://verl.readthedocs.io/en/latest/advance/checkpoint.html#convert-fsdp-and-megatron-checkpoints-to-huggingface-format-model
 
@@ -539,4 +541,5 @@ python -m verl.model_merger merge \
 ## 参考资料
 - [HybridFlow / veRL 原文浅析](https://zhuanlan.zhihu.com/p/24682036412)
 - [深入浅出理解 verl 源码（Part 1）](https://zhuanlan.zhihu.com/p/1920751852749849692)
+- [深入浅出理解 verl 源码——Rollout](https://zhuanlan.zhihu.com/p/1923349757566388159)
 

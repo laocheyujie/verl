@@ -175,6 +175,7 @@ def compute_response_mask(data: DataProto):
     responses = data.batch["responses"]
     response_length = responses.size(1)
     attention_mask = data.batch["attention_mask"]
+    # NOTE: 假设整个序列是 [Prompt, Response] 连接在一起的，且 pad 在左侧
     return attention_mask[:, -response_length:]
 
 
@@ -1134,10 +1135,11 @@ class RayPPOTrainer:
 
                             del rm_scores, gen_baseline_batch, gen_baseline_output
                     # repeat to align with repeated responses in rollout
-                    # NOTE: 重复 n 次
+                    # NOTE: 重复 n 次以对齐 rollout 的响应次数
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
+                    # NOTE: 10. 计算响应掩码 `response_mask`，并可选地进行批次平衡
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
                     # Balance the number of valid tokens across DP ranks.
@@ -1150,7 +1152,7 @@ class RayPPOTrainer:
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
-                    # NOTE: 10. 根据配置使用奖励模型或自定义奖励函数计算 token 级别的奖励分数，支持同步和异步计算
+                    # NOTE: 11. 根据配置使用奖励模型或自定义奖励函数计算 token 级别的奖励分数 reward，支持同步和异步计算
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
@@ -1179,7 +1181,7 @@ class RayPPOTrainer:
                             policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
                         )
                     else:  # Recompute old_log_probs
-                        # NOTE: 11. 使用 megatron 基于训练开始前的 policy 重新计算 behaviour policy 的 log probabilities
+                        # NOTE: 12. 使用 megatron 基于训练开始前的 policy 重新计算 behaviour policy 的 old_log_prob
                         # 用于重要性采样，同时计算熵值
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
@@ -1204,7 +1206,7 @@ class RayPPOTrainer:
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
 
-                    # NOTE: 12. 使用 reference policy 计算 log probs，用于 KL 散度计算
+                    # NOTE: 13. 使用 reference policy 计算 ref_log_prob，用于 KL 散度计算
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
@@ -1215,13 +1217,13 @@ class RayPPOTrainer:
                             batch = batch.union(ref_log_prob)
 
                     # compute values
-                    # NOTE: 13. 使用 Critic 网络计算状态价值，用于优势函数估计
+                    # NOTE: 14. 使用 Critic 网络计算状态价值，用于优势函数估计
                     if self.use_critic:
                         with marked_timer("values", timing_raw, color="cyan"):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
 
-                    # NOTE: 14. 根据配置的优势估计器 (GAE、GRPO、REMAX 等) 计算优势函数，支持 KL 惩罚
+                    # NOTE: 15. 根据配置的优势估计器 (GAE、GRPO、REMAX 等) 计算优势函数，支持 KL 惩罚
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
@@ -1272,7 +1274,7 @@ class RayPPOTrainer:
                         )
 
                     # update critic
-                    # NOTE: 15. 使用计算出的优势函数更新 Critic 网络参数
+                    # NOTE: 16. 使用计算出的优势函数更新 Critic 网络参数
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
                             critic_output = self.critic_wg.update_critic(batch)
@@ -1293,12 +1295,12 @@ class RayPPOTrainer:
                         metrics.update(actor_output_metrics)
 
                     # Log rollout generations if enabled
-                    # NOTE: 17. 将生成的序列、输入、输出和分数保存到指定目录
+                    # NOTE: 18. 将生成的序列、输入、输出和分数保存到指定目录
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
-                # NOTE: 18. 根据配置的频率执行验证，计算验证指标并记录
+                # NOTE: 19. 根据配置的频率执行验证，计算验证指标并记录
                 # validate
                 if (
                     self.val_reward_fn is not None
@@ -1323,7 +1325,7 @@ class RayPPOTrainer:
                 # 2. It's the last training step.
                 # 3. The current step number is a multiple of the save frequency.
                 # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                # NOTE: 19. 根据配置的频率保存模型检查点
+                # NOTE: 20. 根据配置的频率保存模型检查点
                 if self.config.trainer.save_freq > 0 and (
                     is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
                 ):
@@ -1357,7 +1359,7 @@ class RayPPOTrainer:
                     }
                 )
                 # collect metrics
-                # NOTE: 20. 收集训练指标、时序指标和吞吐量指标，并记录到日志系统
+                # NOTE: 21. 收集训练指标、时序指标和吞吐量指标，并记录到日志系统
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
@@ -1372,7 +1374,7 @@ class RayPPOTrainer:
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
-                # NOTE: 21. 更新进度条，递增全局步数，并在达到总训练步数时结束训练
+                # NOTE: 22. 更新进度条，递增全局步数，并在达到总训练步数时结束训练
                 progress_bar.update(1)
                 self.global_steps += 1
 
