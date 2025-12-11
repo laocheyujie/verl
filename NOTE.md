@@ -66,13 +66,13 @@ def run_ppo(config) -> None:
     3. 添加奖励模型 (`add_reward_model_worker`)
         1. 选择 Worker 类：`RewardModelWorker`
         2. 创建远程 Ray Actor：`ray.remote(RewardModelWorker)`
-        3. 定义 Ray 角色到 Worker 映射：`self.role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)`
-        4. 定义 Ray 角色到资源池映射：`self.mapping[Role.RewardModel] = "reward_pool"` 或 `self.mapping[Role.RewardModel] = "global_pool"`
+        3. 定义 Ray 角色 (RewardModel) 到 Worker 映射：`self.role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)`
+        4. 定义 Ray 角色 (RewardModel) 到资源池映射：`self.mapping[Role.RewardModel] = "reward_pool"` 或 `self.mapping[Role.RewardModel] = "global_pool"`
     4. 添加参考策略 (`add_ref_policy_worker`)
         1. 复用 Actor Rollout Worker 类
         2. 创建远程 Ray Actor：`ray.remote(ref_policy_cls)`
-        3. 定义 Ray 角色到 Worker 映射：`self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)`
-        4. 定义 Ray 角色到资源池映射：`self.mapping[Role.RefPolicy] = "global_pool"`
+        3. 定义 Ray 角色 (RefPolicy) 到 Worker 映射：`self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)`
+        4. 定义 Ray 角色 (RefPolicy) 到资源池映射：`self.mapping[Role.RefPolicy] = "global_pool"`
     5. 验证配置
 3. 获取模型本地路径：如果是 HDFS 路径，则下载到本地；否则就直接返回模型路径
 4. 获取 Tokenizer：使用 AutoTokenizer，对于没有 pad_token 的 tokenizer，设置 pad_token 为 eos_token，pad_token_id 为 eos_token_id
@@ -80,8 +80,8 @@ def run_ppo(config) -> None:
 6. 加载奖励管理器
 7. 初始化 Ray 资源池管理器
     1. 定义资源池到资源的映射：`resource_pool_spec = {"global_pool": [8, 8], "reward_pool": [...]}`
-    2. 定义 Ray 角色到资源池映射：`self.mapping[Role.ActorRollout] = "global_pool"`
-    3. 定义 Ray 角色到资源池映射：`self.mapping[Role.Critic] = "global_pool"`
+    2. 定义 Ray 角色 (ActorRollout) 到资源池映射：`self.mapping[Role.ActorRollout] = "global_pool"`
+    3. 定义 Ray 角色 (Critic) 到资源池映射：`self.mapping[Role.Critic] = "global_pool"`
     4. 实例化资源管理器 `resource_pool_manager = ResourcePoolManager(resource_pool_spec, self.mapping)`
 8. 创建训练和验证数据集 Dataset 类
 9. 创建 RayPPOTrainer 实例 `trainer`：它是管理所有计算资源和训练流程的中央协调器
@@ -111,11 +111,11 @@ def run_ppo(config) -> None:
     - `ppo_mini_batch_size`: 模型会在数据累积到一个 mini_batch 后更新一次参数
         1. `ppo_mini_batch_size *= rollout.n` 得到更新一次参数使用的**全局**总样本数
         2. `ppo_mini_batch_size = ppo_mini_batch_size // (world_size // ulysses_sequence_parallel_size)` (实际上 `world_size // ulysses_sequence_parallel_size = dp`) 得到**每个 dp 组**分到的 mini_batch 数
-    - 如果设置了`ppo_micro_batch_size`
+    - `ppo_micro_batch_size`: 梯度累积使用的最小样本数
         1. `ppo_micro_batch_size_per_gpu = ppo_micro_batch_size // (world_size // ulysses_sequence_parallel_size)` (实际上 `world_size // ulysses_sequence_parallel_size = dp`) 得到**每个 dp 组**分到的 micro_batch 数
     - 如果想直接设置梯度累计的最小样本数，直接设置 `ppo_micro_batch_size_per_gpu`
 9. 规范化 rollout 相关配置 (`rollout.log_prob_micro_batch_size_per_gpu`)
-10. 规范化 rollout 相关配置 (`ref.log_prob_micro_batch_size_per_gpu`)
+10. 规范化 ref 相关配置 (`ref.log_prob_micro_batch_size_per_gpu`)
 
 **配置里的相关概念**：
 - `ppo_mini_batch_size`: 更新一次参数消耗的全局样本数 (不含 *n)
