@@ -1,0 +1,46 @@
+data:
+  train_batch_size: 64
+  micro_batch_size: null # will be deprecated, use micro_batch_size_per_gpu
+  micro_batch_size_per_gpu: 2  # 单卡上的 batch size
+  train_files: datasets/alpaca_zh/train.parquet
+  val_files: datasets/alpaca_zh/test.parquet
+  prompt_key: prompt  # prompt 字段
+  response_key: response  # response 字段
+  max_length: 12288 # 输入的最大长度为 12K，即 prompt + response 长度最大为 12K
+  truncation: right  # 超出 12K 后从右边截断
+  balance_dp_token: False
+  chat_template: null
+model:
+  partial_pretrain: /models/Qwen/Qwen3-0.6B  # 待微调的模型路径
+  strategy: fsdp
+  fsdp_config:
+    wrap_policy:
+      min_num_params: 0
+    cpu_offload: False  # 是否使用 cpu offload
+    offload_params: False  # 是否将参数进行 offload
+  external_lib: null
+  enable_gradient_checkpointing: True  # 打开会节约一点显存
+  trust_remote_code: False
+  lora_rank: 0  # Set to positive value to enable LoRA (e.g., 32)
+  lora_alpha: 16  # LoRA scaling factor
+  target_modules: all-linear  # Target modules for LoRA adaptation
+  use_liger: False
+optim:
+  lr: 1e-5
+  betas: [0.9, 0.95]
+  weight_decay: 0.01
+  warmup_steps_ratio: 0.1
+  clip_grad: 1.0
+ulysses_sequence_parallel_size: 2
+use_remove_padding: True
+trainer:
+  default_local_dir: /experiments/Qwen3-0.6B-SFT  # 训练后的模型的保存路径
+  default_hdfs_dir: null # change the hdfs path here
+  resume_path: null
+  project_name: "veRL"
+  experiment_name: "Qwen3-0.6B-SFT"
+  total_epochs: 3  # epoch 数
+  save_freq: 100  # 多少个 step 后保存模型，这里可以根据你数据集数量重新算一下
+  total_training_steps: null
+  logger: ['console', 'swanlab']
+  seed: 42

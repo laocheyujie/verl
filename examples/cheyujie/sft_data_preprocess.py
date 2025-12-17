@@ -20,23 +20,14 @@ def main(data_files, save_dir):
     
     def make_map_fn(split):
         def process_fn(example, idx):
-            query = example['query']
-            response = example['response']
+            instruction = example['instruction']
+            input = example['input']
+            prompt = f"{instruction}\n{input}"
+            response = example['output']
             
             data = {
-                "data_source": "mcq",
-                "prompt": [
-                    {
-                        "role": "user",
-                        "content": query,
-                    }
-                ],
-                "ability": "instruction",
-                "reward_model": {"style": "rule", "ground_truth": response},
-                "extra_info": {
-                    "split": split,
-                    "index": idx,
-                },
+                "prompt": prompt,
+                "response": response
             }
             return data
 
@@ -52,6 +43,6 @@ def main(data_files, save_dir):
 
 
 if __name__ == "__main__":
-    data_files = ["/datasets/mcq.json"]
-    save_dir = "/datasets/mcq"
+    data_files = ["/datasets/alpaca_zh.json"]
+    save_dir = "/datasets/alpaca_zh"
     main(data_files, save_dir)

@@ -111,4 +111,5 @@ ray job submit --address="http://127.0.0.1:8265" \
     trainer.test_freq=5 \
     custom_reward_function.path=examples/cheyujie/mcq_reward.py \
     custom_reward_function.name=compute_score \
+    trainer.default_local_dir=${save_model_checkpoint}
     trainer.total_epochs=1 $@ 2>&1 | tee ${SWANLAB_PROJECT}.log
