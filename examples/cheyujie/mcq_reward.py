@@ -37,6 +37,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None):
     assert data_source == "mcq", "data_source must be mcq"
     prediction = extract_answer(solution_str)
     score = calculate_score(prediction, ground_truth)
+    solution_str = solution_str.replace('\n', '')
     print(f"{solution_str[:20]}...{solution_str[-20:]}")
     print(f"prediction: {prediction}, ground_truth: {ground_truth}, score: {score}")
     return score

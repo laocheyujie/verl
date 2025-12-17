@@ -1,5 +1,4 @@
-#!/bin/bash
-# -*- coding: utf-8 -*-
+set -x
 
 NOW=$(date +%Y%m%d%H%M)
 MODEL_NAME=Qwen3-0.6B
@@ -29,15 +28,10 @@ train_files="['$mcq_train_path']"
 test_files="['$mcq_test_path']"
 
 model_path=/models/Qwen/$MODEL_NAME
-save_model_checkpoint=/experiments/$WANDB_EXP
-
-set -x
-
-TP=2
+save_model_checkpoint=/experiments/$SWANLAB_EXP
 
 nnodes=1
 n_gpus_per_node=8
-num_gpus=$(( nnodes * n_gpus_per_node ))
 
 mini_batch_size_per_gpu=8
 mini_batch_size=$(( mini_batch_size_per_gpu * nnodes * n_gpus_per_node ))
@@ -45,21 +39,23 @@ examples_per_rollout=$(( mini_batch_size * 4 ))
 micro_batch_size_per_gpu=4
 # step = 样本数 * (1 - test_ratio) * epoch / examples_per_rollout
 
-max_prompt_length=32768
+max_model_len=32768
 max_response_length=4096
-max_model_len=$(( max_prompt_length + max_response_length ))
+max_prompt_length=$(( max_model_len - max_response_length ))
 
+# 这里的 TP 指的是 rollout 时 vllm/sglang 的 tp
+TP=2
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
     data.train_batch_size=${examples_per_rollout} \
-    data.max_prompt_length=$max_prompt_length \
-    data.max_response_length=$max_response_length \
+    data.max_prompt_length=${max_prompt_length} \
+    data.max_response_length=${max_response_length} \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    actor_rollout_ref.model.path=$model_path \
+    actor_rollout_ref.model.path=${model_path} \
     actor_rollout_ref.model.use_shm=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -84,7 +80,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger='["console","swanlab"]' \
     trainer.project_name=${SWANLAB_PROJECT} \
     trainer.experiment_name=${SWANLAB_EXP} \
-    trainer.default_local_dir=$save_model_checkpoint \
+    trainer.default_local_dir=${save_model_checkpoint} \
     trainer.n_gpus_per_node=${n_gpus_per_node} \
     trainer.nnodes=${nnodes} \
     trainer.save_freq=20 \

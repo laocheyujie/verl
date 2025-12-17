@@ -1,10 +1,8 @@
-#!/bin/bash
-# -*- coding: utf-8 -*-
+set -x
 
 NOW=$(date +%Y%m%d%H%M)
 MODEL_NAME=Qwen3-0.6B
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 # export WANDB_DIR=${MODEL_NAME}-GRPO
 # export WANDB_PROJECT=${WANDB_DIR}
@@ -15,7 +13,6 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export SWANLAB_DIR=${MODEL_NAME}-GRPO
 export SWANLAB_PROJECT=veRL
 export SWANLAB_EXP=${SWANLAB_DIR}-${NOW}
-export SWANLAB_API_KEY=xxx
 
 export RAY_DEDUP_LOGS=0
 export HYDRA_FULL_ERROR=1
@@ -29,15 +26,10 @@ train_files="['$mcq_train_path']"
 test_files="['$mcq_test_path']"
 
 model_path=/models/Qwen/$MODEL_NAME
-save_model_checkpoint=/experiments/$WANDB_EXP
+save_model_checkpoint=/experiments/$SWANLAB_EXP
 
-set -x
-
-TP=2
-
-nnodes=1
+nnodes=2
 n_gpus_per_node=8
-num_gpus=$(( nnodes * n_gpus_per_node ))
 
 mini_batch_size_per_gpu=8
 mini_batch_size=$(( mini_batch_size_per_gpu * nnodes * n_gpus_per_node ))
@@ -45,18 +37,24 @@ examples_per_rollout=$(( mini_batch_size * 4 ))
 micro_batch_size_per_gpu=4
 # step = 样本数 * (1 - test_ratio) * epoch / examples_per_rollout
 
-max_prompt_length=32768
+max_model_len=32768
 max_response_length=4096
-max_model_len=$(( max_prompt_length + max_response_length ))
+max_prompt_length=$(( max_model_len - max_response_length ))
 
+# 这里的 TP 指的是 rollout 时 vllm/sglang 的 tp
+TP=2
 
-python3 -m verl.trainer.main_ppo \
+ray job submit --address="http://127.0.0.1:8265" \
+    --runtime-env=examples/cheyujie/runtime_env.yaml \
+    --no-wait \
+    -- \
+    python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
     data.train_batch_size=${examples_per_rollout} \
-    data.max_prompt_length=$max_prompt_length \
-    data.max_response_length=$max_response_length \
+    data.max_prompt_length=${max_prompt_length} \
+    data.max_response_length=${max_response_length} \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     actor_rollout_ref.model.path=$model_path \
@@ -84,11 +82,11 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger='["console","swanlab"]' \
     trainer.project_name=${SWANLAB_PROJECT} \
     trainer.experiment_name=${SWANLAB_EXP} \
-    trainer.default_local_dir=$save_model_checkpoint \
+    trainer.default_local_dir=${save_model_checkpoint} \
     trainer.n_gpus_per_node=${n_gpus_per_node} \
     trainer.nnodes=${nnodes} \
     trainer.save_freq=20 \
     trainer.test_freq=5 \
-    custom_reward_function.path=/workspace/verl/examples/cheyujie/mcq_reward.py \
+    custom_reward_function.path=examples/cheyujie/mcq_reward.py \
     custom_reward_function.name=compute_score \
-    trainer.total_epochs=5 $@ 2>&1 | tee ${SWANLAB_PROJECT}.log
+    trainer.total_epochs=1 $@ 2>&1 | tee ${SWANLAB_PROJECT}.log
