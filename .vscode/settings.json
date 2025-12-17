@@ -13,5 +13,5 @@
   },
   "iis.configDir": "",
   "editor.formatOnSaveMode": "modificationsIfAvailable",
-  "editor.formatOnSave": true
+  "editor.formatOnSave": false
 }

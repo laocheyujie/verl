@@ -9,7 +9,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export WANDB_DIR=VERL-External-${MODEL_NAME}
 export WANDB_PROJECT=${WANDB_DIR}
 export WANDB_EXP=${MODEL_NAME}-${NOW}
-export WANDB_API_KEY=b7abd3e3cc53f8f0897ea20ea3db64da0395d7fe
+export WANDB_API_KEY=xxx
 export WANDB_INIT_TIMEOUT=1200
 
 export RAY_DEDUP_LOGS=0
@@ -62,8 +62,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.lora_rank=16 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.target_modules=all-linear \
-    actor_rollout_ref.actor.optim.lr=3e-5 \
     actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.actor.optim.lr=3e-5 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${mini_batch_size} \
     actor_rollout_ref.actor.ppo_micro_batch_size=${micro_batch_size} \
     actor_rollout_ref.actor.use_kl_loss=True \

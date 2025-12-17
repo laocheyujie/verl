@@ -40,9 +40,6 @@ defaults:
   # self config override anything above
   - _self_
 
-  # Whether to enable thinking
-  enable_thinking: False
-
 # config for actor, rollout and reference model
 actor_rollout_ref:
 

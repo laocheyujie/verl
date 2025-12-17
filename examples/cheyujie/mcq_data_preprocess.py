@@ -24,7 +24,7 @@ def main(data_files, save_dir):
             response = example['response']
             
             data = {
-                "data_source": "chinese_general_mcq",
+                "data_source": "mcq",
                 "prompt": [
                     {
                         "role": "user",
@@ -52,6 +52,6 @@ def main(data_files, save_dir):
 
 
 if __name__ == "__main__":
-    data_files = ["/data/cheyujie/github_fork/verl/data/all_ppo.json"]
-    save_dir = "/data/cheyujie/github_fork/verl/data/aminer"
+    data_files = ["/workspace/verl/examples/cheyujie/mcq.json"]
+    save_dir = "datasets/mcq"
     main(data_files, save_dir)
